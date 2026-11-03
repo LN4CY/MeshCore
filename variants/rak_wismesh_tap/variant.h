@@ -23,11 +23,11 @@ static const uint8_t WB_IO1 = 17;     // SLOT_A SLOT_B / Touch Reset
 static const uint8_t WB_IO2 = 34;     // SLOT_A SLOT_B / 3V3_S Power Switch
 static const uint8_t WB_IO3 = 21;     // SLOT_C / Display Backlight
 static const uint8_t WB_IO4 = 4;      // SLOT_C / Display DC
-static const uint8_t WB_IO5 = 9;      // SLOT_D / User Button
+static const uint8_t WB_IO5 = 9;      // SLOT_D / Display Reset
 static const uint8_t WB_IO6 = 10;     // SLOT_D / Touch INT
 static const uint8_t WB_SW1 = 33;     // IO_SLOT
 static const uint8_t WB_A0 = 5;       // IO_SLOT
-static const uint8_t WB_A1 = 31;      // IO_SLOT
+static const uint8_t WB_A1 = 31;      // IO_SLOT / User Button (AIN1)
 static const uint8_t WB_I2C1_SDA = 13;// SENSOR_SLOT IO_SLOT
 static const uint8_t WB_I2C1_SCL = 14;// SENSOR_SLOT IO_SLOT
 static const uint8_t WB_I2C2_SDA = 24;// IO_SLOT
@@ -126,10 +126,10 @@ static const uint8_t SCK = PIN_SPI_SCK;
 // Display Hardware Configuration
 #define PIN_TFT_CS (26)
 #define PIN_TFT_DC (4)
-#define PIN_TFT_RST (-1)
+#define PIN_TFT_RST (9)
 #define PIN_TFT_LEDA_CTL (21)
 #define PIN_TFT_BL (21)
-#define PIN_USER_BTN (9)
+#define PIN_USER_BTN (31)
 
 // Touch Hardware Configuration
 #define PIN_TOUCH_INT (10)

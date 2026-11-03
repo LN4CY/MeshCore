@@ -12,10 +12,13 @@
 #define PIN_WISBLOCK_3V3_S  34  // WB_IO2 (P1.02) - Powers sensor & IO slot modules
 #define PIN_TFT_BL          21  // WB_IO3 (P0.21) - Backlight control
 #define PIN_TFT_DC          4   // WB_IO4 (P0.04) - Display Data/Command
-#define PIN_TFT_RST         -1  // Software reset via SPI (WB_IO5 / Pin 9 is User Button)
+#define PIN_TFT_RST         9   // WB_IO5 (P0.09) - Display Reset
 #define PIN_TFT_CS          26  // WB_SPI_CS (P0.26) - Display Chip Select
 #define PIN_TOUCH_INT       10  // WB_IO6 (P0.10) - Touch Interrupt
 #define PIN_TOUCH_RST       17  // WB_IO1 (P0.17) - Touch Reset
+#ifndef PIN_USER_BTN
+#define PIN_USER_BTN        31  // WB_A1 / AIN1 (P0.31) - User Button
+#endif
 
 class RAKWismeshTapBoard : public NRF52BoardDCDC {
 private:

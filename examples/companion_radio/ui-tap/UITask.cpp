@@ -14,9 +14,10 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   Serial.println("[BOOT] Initializing TapUI and FT6336U touch controller...");
   _ui.begin(display);
 
-  // Initialize physical user button (WB_SW1 / Pin 33)
+  // Initialize physical user button (WB_A1 / AIN1 / Pin 31)
   user_btn.begin();
-  Serial.println("[BOOT] Physical button initialized.");
+  Serial.printf("[BOOT] Physical button initialized on AIN1 (Pin %d), initial level=%s\r\n",
+                user_btn.getPin(), digitalRead(user_btn.getPin()) == LOW ? "LOW (PRESSED)" : "HIGH (IDLE)");
 
   Serial.println("[BOOT] UITask initialized successfully.");
 }
@@ -66,6 +67,21 @@ void UITask::onACKRecv(uint32_t ack_crc) {
 }
 
 void UITask::loop() {
+  // Raw button transition debug logging on AIN1 (Pin 31)
+  static int last_raw_btn = HIGH;
+  static uint32_t raw_down_ms = 0;
+  int raw_btn = digitalRead(user_btn.getPin());
+  if (raw_btn != last_raw_btn) {
+    last_raw_btn = raw_btn;
+    if (raw_btn == LOW) {
+      raw_down_ms = millis();
+      Serial.printf("[BUTTON-DBG] AIN1 (Pin %d) PRESSED (LOW)\r\n", user_btn.getPin());
+    } else {
+      Serial.printf("[BUTTON-DBG] AIN1 (Pin %d) RELEASED (HIGH) after %lu ms\r\n",
+                    user_btn.getPin(), (unsigned long)(millis() - raw_down_ms));
+    }
+  }
+
   // Check physical user button
   int ev = user_btn.check();
   if (ev == BUTTON_EVENT_CLICK) {
