@@ -62,17 +62,36 @@ static const uint8_t NUM_QUICK_RESPONSES = 6;
 static uint8_t s_quick_idx = 0;
 
 static const RFPreset RF_PRESETS[] = {
-  { "US915 LongFast",  906.875f, 11, 250.0f, 5 },
-  { "US915 MedFast",   906.875f,  9, 250.0f, 5 },
-  { "US915 ShortFast", 906.875f,  7, 250.0f, 5 },
-  { "US915 WisMesh",   910.525f, 10, 125.0f, 5 },
-  { "EU868 LongFast",  869.525f, 11, 250.0f, 5 },
-  { "EU868 WisMesh",   869.618f, 10, 125.0f, 5 },
-  { "AU915 LongFast",  915.000f, 11, 250.0f, 5 },
-  { "EU433 LongFast",  433.175f, 11, 250.0f, 5 },
-  { "Custom",            0.000f,  0,   0.0f, 0 }
+  { "Australia",                915.800f, 10, 250.0f, 5, 0 },
+  { "Australia (Narrow)",       916.575f,  7,  62.5f, 7, 0 },
+  { "Australia (Mid)",          915.075f,  9, 125.0f, 5, 0 },
+  { "Australia: SA, WA",        923.125f,  8,  62.5f, 8, 0 },
+  { "Australia: QLD",           923.125f,  8,  62.5f, 5, 0 },
+  { "Brazil",                   923.125f,  8,  62.5f, 8, 0 },
+  { "Canada (3B)",              910.525f,  7,  62.5f, 5, 3 },
+  { "Costa Rica",               910.525f, 11, 125.0f, 5, 0 },
+  { "EU/UK (Narrow)",           869.618f,  8,  62.5f, 8, 0 },
+  { "EU/UK (Deprecated)",       869.525f, 11, 250.0f, 5, 0 },
+  { "Czech Republic (Narrow)",  869.432f,  7,  62.5f, 5, 2 },
+  { "EU 433MHz (Long Range)",   433.650f, 11, 250.0f, 5, 0 },
+  { "EU 433MHz (Narrow)",       433.650f,  8,  62.5f, 8, 0 },
+  { "Hungary (2B)",             869.618f,  7,  62.5f, 5, 2 },
+  { "Netherlands",              869.618f,  7,  62.5f, 5, 0 },
+  { "Netherlands (Limburg)",    869.618f,  8,  62.5f, 8, 2 },
+  { "New Zealand (Narrow)",     917.375f,  7,  62.5f, 5, 2 },
+  { "New Zealand (Gisborne)",   917.375f, 11, 250.0f, 5, 1 },
+  { "Portugal 433",             433.375f,  9,  62.5f, 6, 0 },
+  { "Portugal 868",             869.618f,  7,  62.5f, 6, 0 },
+  { "Slovakia (2B)",            869.618f,  7,  62.5f, 5, 2 },
+  { "Switzerland",              869.618f,  8,  62.5f, 8, 0 },
+  { "Thailand",                 921.000f,  7,  62.5f, 5, 0 },
+  { "USA",                      910.525f,  7,  62.5f, 5, 0 },
+  { "USA - SoCal (3B)",         927.875f,  7,  62.5f, 5, 3 },
+  { "Vietnam (Narrow)",         920.250f,  8,  62.5f, 5, 0 },
+  { "Vietnam (Deprecated)",     920.250f, 11, 250.0f, 5, 0 },
+  { "Custom",                     0.000f,  0,   0.0f, 0, 0 }
 };
-static const int NUM_RF_PRESETS = 9;
+static const int NUM_RF_PRESETS = 28;
 
 static const uint32_t GPS_BAUD_OPTIONS[] = { 9600, 19200, 38400, 57600, 115200 };
 static const int NUM_GPS_BAUDS = 5;
@@ -130,12 +149,13 @@ TapUI::TapUI()
     _nodes_page(0),
     _gps_baud(9600),
     _gps_pins_swapped(false),
-    _selected_preset_idx(3), // Default US915 WisMesh
+    _selected_preset_idx(23), // Default USA (910.525 MHz / SF7 / BW62.5 / CR5)
     _radio_freq(910.525f),
-    _radio_sf(10),
-    _radio_bw(125.0f),
+    _radio_sf(7),
+    _radio_bw(62.5f),
     _radio_cr(5),
     _radio_tx_power(22),
+    _radio_path_hash_mode(0),
     _radio_status_expiry(0)
 {
   _text_buffer[0] = 0;
@@ -191,15 +211,19 @@ void TapUI::syncRadioParamsFromPrefs() {
     if (prefs->bw > 5.0f) _radio_bw = prefs->bw;
     if (prefs->cr >= 5 && prefs->cr <= 8) _radio_cr = prefs->cr;
     if (prefs->tx_power_dbm != 0) _radio_tx_power = prefs->tx_power_dbm;
+    _radio_path_hash_mode = prefs->path_hash_mode;
 
     _selected_preset_idx = NUM_RF_PRESETS - 1; // Custom
-    for (int p = 0; p < NUM_RF_PRESETS - 1; p++) {
-      if (fabs(_radio_freq - RF_PRESETS[p].freq) < 0.05f &&
+    // First pass: check primary presets (USA=23, EU/UK Narrow=8) and exact path_hash_mode matches
+    for (int p = NUM_RF_PRESETS - 2; p >= 0; p--) {
+      uint8_t p_mode = (RF_PRESETS[p].path_hash_size > 0) ? (RF_PRESETS[p].path_hash_size - 1) : 0;
+      if (fabs(_radio_freq - RF_PRESETS[p].freq) < 0.005f &&
           _radio_sf == RF_PRESETS[p].sf &&
-          fabs(_radio_bw - RF_PRESETS[p].bw) < 5.0f &&
-          _radio_cr == RF_PRESETS[p].cr) {
+          fabs(_radio_bw - RF_PRESETS[p].bw) < 1.0f &&
+          _radio_cr == RF_PRESETS[p].cr &&
+          _radio_path_hash_mode == p_mode) {
         _selected_preset_idx = p;
-        break;
+        if (p == 23 || p == 8) break; // Prefer USA / EU/UK (Narrow) over identical regional duplicates
       }
     }
   }
@@ -676,6 +700,9 @@ void TapUI::applyRFPreset(int preset_idx) {
   _radio_sf   = RF_PRESETS[preset_idx].sf;
   _radio_bw   = RF_PRESETS[preset_idx].bw;
   _radio_cr   = RF_PRESETS[preset_idx].cr;
+  _radio_path_hash_mode = (RF_PRESETS[preset_idx].path_hash_size > 0)
+                            ? (RF_PRESETS[preset_idx].path_hash_size - 1)
+                            : 0;
   _needs_full_redraw = true;
 }
 
@@ -687,6 +714,7 @@ void TapUI::applyAndSaveRadioParams() {
     prefs->bw = _radio_bw;
     prefs->cr = _radio_cr;
     prefs->tx_power_dbm = _radio_tx_power;
+    prefs->path_hash_mode = _radio_path_hash_mode;
     the_mesh.savePrefs();
   }
   radio_driver.setParams(_radio_freq, _radio_bw, _radio_sf, _radio_cr);

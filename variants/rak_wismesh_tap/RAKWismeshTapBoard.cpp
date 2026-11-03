@@ -211,7 +211,7 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
     Serial.println("System:   ver | board | status | reboot | poweroff | start ota | erase | save | apply");
     Serial.println("Stats:    stats-core | stats-radio | stats-packets | clear stats");
     Serial.println("Clock:    clock | clock sync | clock gps | clock set <YYYY-MM-DD HH:MM:SS> | clock adjust <sec> | time <epoch>");
-    Serial.println("Mesh/RF:  advert | advert.zerohop | presets | preset <0-7>");
+    Serial.println("Mesh/RF:  advert | advert.zerohop | presets | preset <0-26|name>");
     Serial.println("Channels: channels | channel get <0-7> | channel set <0-7> <name> [hex/b64_key]");
     Serial.println("          channel hashtag <0-7> <#tag> | channel public <0-7> | channel random <0-7> [name]");
     Serial.println("          channel clear <0-7> | channel use <0-7>");
@@ -325,25 +325,36 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
     return true;
   }
   if (strcmp(command, "presets") == 0) {
-    Serial.println("\r\n=== Available RF Presets ===");
+    Serial.println("\r\n=== Official MeshCore RF Presets (api.meshcore.nz) ===");
     for (int i = 0; i < TapUI::getNumPresets() - 1; i++) {
       const RFPreset& p = TapUI::getPreset(i);
-      Serial.printf(" [%d] %-16s : %.3f MHz, SF%u, BW %.1f kHz, CR 4/%u\r\n", i, p.name, p.freq, p.sf, p.bw, p.cr);
+      uint8_t hb = p.path_hash_size ? p.path_hash_size : 1;
+      Serial.printf(" [%2d] %-24s : %.3f MHz, SF%u, BW %.1f kHz, CR 4/%u (%uB hash)\r\n",
+                    i, p.name, p.freq, p.sf, p.bw, p.cr, hb);
     }
-    strcpy(reply, "0:US915 LongFast, 1:US915 MedFast, 2:US915 ShortFast, 3:US915 WisMesh, 4:EU868 LongFast, 5:EU868 WisMesh, 6:AU915 LongFast, 7:EU433 LongFast");
+    strcpy(reply, "27 official MeshCore presets (0..26) printed to Serial. E.g. 'preset 23' (USA), 'preset 6' (Canada 3B), 'preset 8' (EU/UK Narrow)");
     return true;
   }
   if (memcmp(command, "preset ", 7) == 0) {
     const char* arg = command + 7;
     while (*arg == ' ') arg++;
     int idx = -1;
-    if (*arg >= '0' && *arg <= '7') {
+    if (*arg >= '0' && *arg <= '9') {
       idx = atoi(arg);
     } else {
+      // Exact case-insensitive match first, then substring match
       for (int i = 0; i < TapUI::getNumPresets() - 1; i++) {
         if (strcasecmp(arg, TapUI::getPreset(i).name) == 0) {
           idx = i;
           break;
+        }
+      }
+      if (idx < 0) {
+        for (int i = 0; i < TapUI::getNumPresets() - 1; i++) {
+          if (strncasecmp(arg, TapUI::getPreset(i).name, strlen(arg)) == 0) {
+            idx = i;
+            break;
+          }
         }
       }
     }
@@ -351,10 +362,11 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
       ui.applyRFPreset(idx);
       ui.applyAndSaveRadioParams();
       const RFPreset& p = TapUI::getPreset(idx);
-      snprintf(reply, 140, "OK - Preset [%d] %s applied (%.3f MHz, SF%u, BW %.1f kHz, CR 4/%u)",
-               idx, p.name, p.freq, p.sf, p.bw, p.cr);
+      uint8_t hb = p.path_hash_size ? p.path_hash_size : 1;
+      snprintf(reply, 150, "OK - Preset [%d] %s applied (%.3f MHz, SF%u, BW %.1f kHz, CR 4/%u, %uB hash)",
+               idx, p.name, p.freq, p.sf, p.bw, p.cr, hb);
     } else {
-      strcpy(reply, "Err - specify preset index 0..7 (type 'presets' for list)");
+      strcpy(reply, "Err - specify preset index 0..26 or name (type 'presets' for list)");
     }
     return true;
   }

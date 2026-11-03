@@ -48,6 +48,7 @@ struct RFPreset {
   uint8_t sf;
   float bw;
   uint8_t cr;
+  uint8_t path_hash_size; // 0 = default (1B), or 1..3B (path_hash_mode = path_hash_size - 1)
 };
 
 struct TapDeviceSettings {
@@ -119,6 +120,7 @@ private:
   float _radio_bw;
   uint8_t _radio_cr;
   int8_t _radio_tx_power;
+  uint8_t _radio_path_hash_mode;
   char _radio_status_msg[42];
   unsigned long _radio_status_expiry;
 
