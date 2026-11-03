@@ -34,7 +34,7 @@ public:
     _isOn = false;
   }
 #elif defined(RAK_WISMESH_TAP)
-  ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64), 
+  ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(320, 240), 
       display(&SPI1, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST),
       _peripher_power(peripher_power)
   {

@@ -2239,6 +2239,20 @@ void MyMesh::checkCLIRescueCmd() {
     if (handleCommand(cli_command, 0, reply_buf)) {
       // command was handled, print reply output
       Serial.print("  "); Serial.print(reply_buf); Serial.println();
+    } else if (strcmp(cli_command, "help") == 0 || strcmp(cli_command, "?") == 0) {
+      Serial.println("\r\n=== WisMesh Tap CLI Commands ===");
+      Serial.println("  get name             - Show node name");
+      Serial.println("  set name <name>      - Set node name");
+      Serial.println("  get freq             - Show LoRa frequency");
+      Serial.println("  get tx               - Show LoRa TX power");
+      Serial.println("  set radio <f> <b> <s> <c> - Set radio config");
+      Serial.println("  set pin <pin>        - Set BLE PIN");
+      Serial.println("  ls UserData          - List stored files");
+      Serial.println("  cat <path>           - Print file content");
+      Serial.println("  rm <path>            - Delete file");
+      Serial.println("  rebuild              - Reset storage & rebuild index");
+      Serial.println("  reboot               - Reboot device");
+      Serial.println("  help / ?             - Show this help menu\r\n");
     } else if (strcmp(cli_command, "rebuild") == 0) {
       bool success = _store->formatFileSystem();
       if (success) {
@@ -2419,9 +2433,8 @@ void MyMesh::loop() {
     checkCLIRescueCmd();
   } else {
     checkSerialInterface();
-#if defined(ENABLE_WIFI_INTERFACE) && defined(RP2040_PLATFORM) && !defined(ENABLE_USB_INTERFACE)
-    // RP2040 WiFi builds are headless and have no way into the rescue CLI (that needs a
-    // display + long-press), so serve config commands on the otherwise unused USB serial
+#if (defined(ENABLE_WIFI_INTERFACE) && defined(RP2040_PLATFORM) && !defined(ENABLE_USB_INTERFACE)) || (defined(WISMESH_TAP_STANDALONE) && !defined(ENABLE_USB_INTERFACE))
+    // WisMesh Tap standalone uses Mailbox for UI and USB Serial for interactive debug & CLI
     checkCLIRescueCmd();
 #endif
   }
