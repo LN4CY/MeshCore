@@ -37,4 +37,5 @@ public:
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
   void onControlDataRecv(const mesh::Packet* pkt) override;
   void onACKRecv(uint32_t ack_crc) override;
+  bool onUnhandledResponse(const ContactInfo &from, uint32_t tag, const uint8_t* data, uint8_t len) override;
 };

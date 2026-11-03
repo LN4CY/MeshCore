@@ -54,8 +54,9 @@ void UITask::onQueueSizeChanged(int msgcount) {
 }
 
 void UITask::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
-  Serial.printf("[UI] Discovered contact: %s\r\n", contact.name);
-  if (_ui.getCurrentTab() == TAB_NODES) {
+  Serial.printf("[UI] Discovered contact: %s (lat=%ld lon=%ld)\r\n",
+                contact.name, (long)contact.gps_lat, (long)contact.gps_lon);
+  if (_ui.getCurrentTab() == TAB_NODES || _ui.getCurrentTab() == TAB_GPS) {
     _ui.markNeedsRedraw();
   }
 }
@@ -64,6 +65,40 @@ void UITask::onControlDataRecv(const mesh::Packet* pkt) {
 }
 
 void UITask::onACKRecv(uint32_t ack_crc) {
+}
+
+bool UITask::onUnhandledResponse(const ContactInfo &from, uint32_t tag, const uint8_t* data, uint8_t len) {
+  struct LPPSizeHelper : public CayenneLPP {
+    LPPSizeHelper() : CayenneLPP(0) {}
+    uint8_t sizeOf(uint8_t t) { return getTypeSize(t); }
+  } lpp;
+
+  // Scan CayenneLPP telemetry response for LPP_GPS (type 136, 9 bytes)
+  int i = 0;
+  while (i + 2 <= len) {
+    uint8_t ch = data[i];
+    uint8_t type = data[i + 1];
+    (void)ch;
+    if (type == LPP_GPS && i + 11 <= len) {
+      int32_t raw_lat = ((int32_t)(int8_t)data[i + 2] << 16) |
+                        ((int32_t)data[i + 3] << 8) |
+                        ((int32_t)data[i + 4]);
+      int32_t raw_lon = ((int32_t)(int8_t)data[i + 5] << 16) |
+                        ((int32_t)data[i + 6] << 8) |
+                        ((int32_t)data[i + 7]);
+      ContactInfo* live = the_mesh.lookupContactByPubKey(from.id.pub_key, PUB_KEY_SIZE);
+      if (live && (raw_lat != 0 || raw_lon != 0)) {
+        live->gps_lat = raw_lat * 100; // 1e-4 deg -> 1e-6 deg
+        live->gps_lon = raw_lon * 100;
+        _ui.markNeedsRedraw();
+      }
+      break;
+    }
+    uint8_t sz = lpp.sizeOf(type);
+    if (sz == 0) break;
+    i += 2 + sz;
+  }
+  return false; // allow companion app to receive binary/telemetry response too
 }
 
 void UITask::loop() {

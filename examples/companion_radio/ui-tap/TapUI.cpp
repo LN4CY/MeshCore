@@ -170,6 +170,12 @@ TapUI::TapUI()
     _nodes_page(0),
     _gps_baud(9600),
     _gps_pins_swapped(false),
+    _gps_subview(0),
+    _gps_nav_target_slot(-1),
+    _gps_metric_units(true),
+    _gps_fix_saved_once(false),
+    _last_gps_save_ms(0),
+    _last_gps_ui_refresh_ms(0),
     _selected_preset_idx(23), // Default USA (910.525 MHz / SF7 / BW62.5 / CR5)
     _radio_freq(910.525f),
     _radio_sf(7),
@@ -278,6 +284,21 @@ bool TapUI::begin(DisplayDriver* display) {
     bluetooth_interface.disable();
   }
 #endif
+
+  // Enable GPS & location sharing with MeshCore companion app and adverts by default
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  if (prefs) {
+    bool changed = false;
+    if (prefs->gps_enabled == 0 && prefs->advert_loc_policy == 0 && prefs->telemetry_mode_loc == 0) {
+      prefs->gps_enabled = 1;
+      prefs->advert_loc_policy = ADVERT_LOC_SHARE;
+      prefs->telemetry_mode_loc = TELEM_MODE_ALLOW_ALL;
+      changed = true;
+    }
+    if (changed) {
+      the_mesh.savePrefs();
+    }
+  }
 
   restartGPS();
 
@@ -629,10 +650,7 @@ void TapUI::restartGPS() {
   }
   Serial1.begin(_gps_baud);
 
-  LocationProvider* loc = sensors.getLocationProvider();
-  if (loc) {
-    loc->begin();
-  }
+  sensors.setGpsActive(true);
 }
 
 void TapUI::setGPSBaud(uint32_t baud, bool persist) {
@@ -647,6 +665,83 @@ void TapUI::setGPSPinsSwapped(bool swapped, bool persist) {
   restartGPS();
   if (persist) saveDeviceSettings();
   _needs_full_redraw = true;
+}
+
+bool TapUI::isGPSShareEnabled() const {
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  if (!prefs) return true;
+  return prefs->advert_loc_policy != ADVERT_LOC_NONE;
+}
+
+void TapUI::setGPSShareEnabled(bool share) {
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  if (!prefs) return;
+  prefs->advert_loc_policy = share ? ADVERT_LOC_SHARE : ADVERT_LOC_NONE;
+  prefs->telemetry_mode_loc = share ? TELEM_MODE_ALLOW_ALL : TELEM_MODE_DENY;
+  the_mesh.savePrefs();
+  _needs_full_redraw = true;
+}
+
+const char* TapUI::degToCardinal(float deg) {
+  static const char* DIRS[16] = {
+    "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+    "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"
+  };
+  float norm = fmod(deg + 360.0f, 360.0f);
+  int idx = (int)((norm + 11.25f) / 22.5f) & 15;
+  return DIRS[idx];
+}
+
+double TapUI::calcDistanceMeters(double lat1, double lon1, double lat2, double lon2) {
+  const double R = 6371000.0;
+  double dLat = (lat2 - lat1) * (M_PI / 180.0);
+  double dLon = (lon2 - lon1) * (M_PI / 180.0);
+  double a = sin(dLat * 0.5) * sin(dLat * 0.5) +
+             cos(lat1 * (M_PI / 180.0)) * cos(lat2 * (M_PI / 180.0)) *
+             sin(dLon * 0.5) * sin(dLon * 0.5);
+  double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+  return R * c;
+}
+
+double TapUI::calcBearingDegrees(double lat1, double lon1, double lat2, double lon2) {
+  double phi1 = lat1 * (M_PI / 180.0);
+  double phi2 = lat2 * (M_PI / 180.0);
+  double dLon = (lon2 - lon1) * (M_PI / 180.0);
+  double y = sin(dLon) * cos(phi2);
+  double x = cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dLon);
+  double brng = atan2(y, x) * (180.0 / M_PI);
+  return fmod(brng + 360.0, 360.0);
+}
+
+void TapUI::syncGPSWithMesh() {
+  LocationProvider* loc = sensors.getLocationProvider();
+  if (!loc || !loc->isEnabled() || !loc->isValid()) return;
+
+  double lat = (double)loc->getLatitude() / 1000000.0;
+  double lon = (double)loc->getLongitude() / 1000000.0;
+  double alt = (double)loc->getAltitude() / 1000.0;
+  if (lat == 0.0 && lon == 0.0) return;
+
+  sensors.node_lat = lat;
+  sensors.node_lon = lon;
+  sensors.node_altitude = alt;
+
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  if (prefs) {
+    double prev_saved_lat = prefs->node_lat;
+    double prev_saved_lon = prefs->node_lon;
+    prefs->node_lat = lat;
+    prefs->node_lon = lon;
+
+    unsigned long now = millis();
+    if (!_gps_fix_saved_once ||
+        ((now - _last_gps_save_ms > 300000UL) &&
+         calcDistanceMeters(prev_saved_lat, prev_saved_lon, lat, lon) > 50.0)) {
+      _gps_fix_saved_once = true;
+      _last_gps_save_ms = now;
+      the_mesh.savePrefs();
+    }
+  }
 }
 
 void TapUI::wakeScreen() {
@@ -990,10 +1085,19 @@ void TapUI::update() {
 
   unsigned long now = millis();
 
+  // Keep MeshCore sensors.node_lat/node_lon and prefs->node_lat/node_lon synced with live GPS fix
+  syncGPSWithMesh();
+
   // Screen sleep inactivity timer
   if (_screen_sleep_seconds > 0 && !_is_screen_sleeping && (now - _last_activity_ms > _screen_sleep_seconds * 1000UL)) {
     _is_screen_sleeping = true;
     board.setBacklight(false);
+  }
+
+  // Live refresh when viewing the GPS tab so speed, heading, satellites & node distance update in real time
+  if (!_is_screen_sleeping && _current_tab == TAB_GPS && (now - _last_gps_ui_refresh_ms > 2000UL)) {
+    _last_gps_ui_refresh_ms = now;
+    _needs_full_redraw = true;
   }
 
   TouchPoint pt;
@@ -2251,105 +2355,389 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
 }
 
 // -------------------------------------------------------------
-// GPS SCREEN
+// GPS SCREEN (2 Sub-Tabs: [GPS TELEMETRY] | [HEADING & NAV])
 // -------------------------------------------------------------
 void TapUI::drawGPSScreen() {
   _display->setColor(colBg());
   _display->fillRect(0, 44, 320, 196);
+  _display->setTextSize(1);
 
+  // Top sub-tab bar: [ GPS TELEMETRY ] (X=8..156, Y=45..65) | [ HEADING & NAV ] (X=164..312, Y=45..65)
+  _display->setColor(_gps_subview == 0 ? COLOR_BLUE_KEY : colCardBg());
+  _display->fillRect(8, 45, 148, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(8, 45, 148, 20);
+  _display->setColor(_gps_subview == 0 ? COLOR_WHITE : colText());
+  drawStr(32, 51, "[ GPS TELEMETRY ]");
+
+  _display->setColor(_gps_subview == 1 ? COLOR_BLUE_KEY : colCardBg());
+  _display->fillRect(164, 45, 148, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(164, 45, 148, 20);
+  _display->setColor(_gps_subview == 1 ? COLOR_WHITE : colText());
+  drawStr(188, 51, "[ HEADING & NAV ]");
+
+  if (_gps_subview == 0) {
+    drawGPSStatusView();
+  } else {
+    drawGPSNavView();
+  }
+}
+
+void TapUI::drawGPSStatusView() {
+  LocationProvider* loc = sensors.getLocationProvider();
+  bool hasLoc = (loc != nullptr && loc->isEnabled());
+  bool fixValid = (hasLoc && loc->isValid());
+  long sats = hasLoc ? loc->satellitesCount() : 0;
+  bool shareOn = isGPSShareEnabled();
+
+  // Row 1 (Y = 69..89): Fix Status Banner (X=8..204) + [SHARE:ON/OFF] Toggle (X=208..312)
+  _display->setColor(fixValid ? COLOR_GREEN_BTN : (hasLoc ? COLOR_ORANGE_BTN : colCardBg()));
+  _display->fillRect(8, 69, 196, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(8, 69, 196, 20);
+  _display->setColor(fixValid ? COLOR_WHITE : (hasLoc ? COLOR_BLACK : colSubText()));
+
+  char statusBuf[34];
+  if (fixValid) {
+    snprintf(statusBuf, sizeof(statusBuf), "3D FIX LOCKED (%ld SAT)", sats);
+  } else if (hasLoc) {
+    snprintf(statusBuf, sizeof(statusBuf), "SEARCHING SATS (%ld IN VIEW)", sats);
+  } else {
+    strcpy(statusBuf, "GPS RECEIVER OFF");
+  }
+  drawStr(16, 75, statusBuf);
+
+  _display->setColor(shareOn ? COLOR_GREEN_BTN : colCardBg());
+  _display->fillRect(208, 69, 104, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(208, 69, 104, 20);
+  _display->setColor(shareOn ? COLOR_WHITE : colText());
+  drawStr(214, 75, shareOn ? "APP SHARE:ON" : "APP SHARE:OFF");
+
+  // Row 2 (Y = 92..160): Coordinates, Altitude, Speed/Heading preview & Diagnostics Card
+  _display->setColor(colCardBg());
+  _display->fillRect(8, 92, 304, 68);
+  _display->setColor(colBorder());
+  _display->drawRect(8, 92, 304, 68);
+
+  char buf[68];
+  if (fixValid) {
+    double lat = (double)loc->getLatitude() / 1e6;
+    double lon = (double)loc->getLongitude() / 1e6;
+    long alt_m = loc->getAltitude() / 1000L;
+
+    _display->setColor(colText());
+    snprintf(buf, sizeof(buf), "Lat: %.6f %c   Lon: %.6f %c",
+             fabs(lat), lat >= 0 ? 'N' : 'S',
+             fabs(lon), lon >= 0 ? 'E' : 'W');
+    drawStr(14, 97, buf);
+
+    snprintf(buf, sizeof(buf), "Alt: %ld m (%ld ft)   HDOP: %.1f",
+             alt_m, (long)(alt_m * 3.28084), (float)tap_gps.getHDOP() / 10.0f);
+    drawStr(14, 111, buf);
+
+    _display->setColor(colTitle());
+    if (tap_gps.hasCourse()) {
+      float crs = tap_gps.getCourseDeg();
+      snprintf(buf, sizeof(buf), "Spd: %.1f km/h (%.1f mph)  Hdg: %03d deg %s",
+               tap_gps.getSpeedKmh(), tap_gps.getSpeedMph(),
+               (int)(crs + 0.5f) % 360, degToCardinal(crs));
+    } else {
+      snprintf(buf, sizeof(buf), "Spd: %.1f km/h (%.1f mph)  Hdg: --- (Static)",
+               tap_gps.getSpeedKmh(), tap_gps.getSpeedMph());
+    }
+    drawStr(14, 125, buf);
+  } else {
+    _display->setColor(colSubText());
+    if (sensors.node_lat != 0.0 || sensors.node_lon != 0.0) {
+      snprintf(buf, sizeof(buf), "Saved Pos: %.5f, %.5f", sensors.node_lat, sensors.node_lon);
+      drawStr(14, 97, buf);
+    } else {
+      drawStr(14, 97, "Coordinates: Waiting for satellite fix...");
+    }
+    drawStr(14, 111, "Altitude:    Waiting for satellite fix...");
+    drawStr(14, 125, "Tap [HEADING & NAV] for Speed & Node Dist");
+  }
+
+  char diag[48];
+  if (loc) loc->formatDiagnostics(diag, sizeof(diag));
+  else strcpy(diag, "en:1 sat:0 fix:0");
+  snprintf(buf, sizeof(buf), "Diag: %.42s", diag);
+  _display->setColor(colMutedText());
+  drawStr(14, 143, buf);
+
+  // Row 3 (Y = 164..186): UART Baud & RX/TX Pin Swap
+  _display->setColor(colTitle());
+  snprintf(buf, sizeof(buf), "Baud:%lu", _gps_baud);
+  drawStr(10, 171, buf);
+
+  _display->setColor(COLOR_BLUE_KEY);
+  _display->fillRect(104, 165, 76, 20);
+  _display->setColor(COLOR_WHITE);
+  drawStr(114, 171, "CHG BAUD");
+
+  _display->setColor(COLOR_CYAN_BTN);
+  _display->fillRect(186, 165, 126, 20);
+  _display->setColor(COLOR_BLACK);
+  drawStr(194, 171, _gps_pins_swapped ? "PINS: RX16/TX15" : "PINS: RX15/TX16");
+
+  // Row 4 (Y = 190..232): [BROADCAST LOC] | [HEADING / NAV] | [GPS: ON/OFF]
+  _display->setColor(COLOR_BLUE_KEY);
+  _display->fillRect(8, 190, 114, 40);
+  _display->setColor(colBorder());
+  _display->drawRect(8, 190, 114, 40);
+  _display->setColor(COLOR_WHITE);
+  drawStr(16, 206, "BROADCAST LOC");
+
+  _display->setColor(COLOR_PURPLE_BTN);
+  _display->fillRect(126, 190, 102, 40);
+  _display->setColor(colBorder());
+  _display->drawRect(126, 190, 102, 40);
+  _display->setColor(COLOR_WHITE);
+  drawStr(136, 206, "HEADING / NAV");
+
+  _display->setColor(hasLoc ? COLOR_GREEN_BTN : colCardBg());
+  _display->fillRect(232, 190, 80, 40);
+  _display->setColor(colBorder());
+  _display->drawRect(232, 190, 80, 40);
+  _display->setColor(hasLoc ? COLOR_WHITE : colText());
+  drawStr(248, 206, hasLoc ? "GPS: ON" : "GPS: OFF");
+}
+
+void TapUI::drawGPSNavView() {
   LocationProvider* loc = sensors.getLocationProvider();
   bool hasLoc = (loc != nullptr && loc->isEnabled());
   bool fixValid = (hasLoc && loc->isValid());
 
-  _display->setColor(fixValid ? COLOR_GREEN_BTN : (hasLoc ? COLOR_ORANGE_BTN : colCardBg()));
-  _display->fillRect(10, 48, 300, 26);
-  _display->setColor(colBorder());
-  _display->drawRect(10, 48, 300, 26);
-
-  _display->setTextSize(1);
-  _display->setColor(fixValid ? COLOR_WHITE : (hasLoc ? COLOR_BLACK : colSubText()));
+  double myLat = 0.0, myLon = 0.0;
+  bool myHasPos = false;
   if (fixValid) {
-    drawStr(75, 56, "[ 3D GPS FIX ACQUIRED ]");
-  } else if (hasLoc) {
-    drawStr(65, 56, "[ SEARCHING SATELLITES... ]");
-  } else {
-    drawStr(70, 56, "[ GPS RECEIVER STANDBY ]");
+    myLat = (double)loc->getLatitude() / 1e6;
+    myLon = (double)loc->getLongitude() / 1e6;
+    myHasPos = (myLat != 0.0 || myLon != 0.0);
+  } else if (sensors.node_lat != 0.0 || sensors.node_lon != 0.0) {
+    myLat = sensors.node_lat;
+    myLon = sensors.node_lon;
+    myHasPos = true;
   }
 
+  // ---------------------------------------------------------
+  // Card 1 (Y = 68..126): Current Heading & Speed
+  // ---------------------------------------------------------
   _display->setColor(colCardBg());
-  _display->fillRect(10, 78, 300, 106);
+  _display->fillRect(8, 68, 304, 58);
   _display->setColor(colBorder());
-  _display->drawRect(10, 78, 300, 106);
+  _display->drawRect(8, 68, 304, 58);
 
   _display->setTextSize(1);
   _display->setColor(colTitle());
+  drawStr(14, 73, "CURRENT HEADING & SPEED");
 
-  char buf[70];
-  long sats = (loc && loc->isEnabled()) ? loc->satellitesCount() : 0;
-  snprintf(buf, sizeof(buf), "Satellites Tracked: %ld in view", sats);
-  drawStr(18, 84, buf);
+  // Unit toggle button [KM/H] / [MPH] at top-right of Card 1: X=234..306, Y=71..89
+  _display->setColor(COLOR_CYAN_BTN);
+  _display->fillRect(234, 71, 72, 18);
+  _display->setColor(COLOR_BLACK);
+  drawStr(242, 76, _gps_metric_units ? "UNIT:KM/H" : "UNIT:MPH");
 
-  double lat = 0.0, lon = 0.0;
-  long alt = 0;
-  if (loc && loc->isEnabled()) {
-    lat = (double)loc->getLatitude() / 1e6;
-    lon = (double)loc->getLongitude() / 1e6;
-    alt = loc->getAltitude();
+  // Big Heading & Speed readout (TextSize 2 at Y = 88)
+  _display->setTextSize(2);
+  char hdgBig[16];
+  if (tap_gps.hasCourse()) {
+    float crs = tap_gps.getCourseDeg();
+    snprintf(hdgBig, sizeof(hdgBig), "%03d %s", (int)(crs + 0.5f) % 360, degToCardinal(crs));
+    _display->setColor(COLOR_GREEN_BTN);
+  } else {
+    strcpy(hdgBig, "--- --");
+    _display->setColor(colSubText());
+  }
+  drawStr(14, 88, hdgBig);
+
+  char spdBig[16];
+  if (_gps_metric_units) {
+    snprintf(spdBig, sizeof(spdBig), "%.1fkm/h", tap_gps.getSpeedKmh());
+  } else {
+    snprintf(spdBig, sizeof(spdBig), "%.1fmph", tap_gps.getSpeedMph());
+  }
+  _display->setColor(COLOR_GOLD_STAR);
+  drawStr(122, 88, spdBig);
+
+  _display->setTextSize(1);
+  _display->setColor(colSubText());
+  char myLine[54];
+  if (myHasPos) {
+    snprintf(myLine, sizeof(myLine), "%.1f kts | Me: %.5f, %.5f (%s)",
+             tap_gps.getSpeedKnots(), myLat, myLon, fixValid ? "3D Fix" : "Saved");
+  } else {
+    snprintf(myLine, sizeof(myLine), "%.1f kts | Waiting for GPS fix...", tap_gps.getSpeedKnots());
+  }
+  drawStr(14, 111, myLine);
+
+  // ---------------------------------------------------------
+  // Card 2 (Y = 130..234): Distance & Heading to Selected Node
+  // ---------------------------------------------------------
+  _display->setColor(colCardBg());
+  _display->fillRect(8, 130, 304, 104);
+  _display->setColor(colBorder());
+  _display->drawRect(8, 130, 304, 104);
+
+  DiscoveredNodeItem items[48];
+  int count = buildSortedContactList(items, 48);
+
+  if (count == 0) {
+    _display->setColor(colSubText());
+    drawStr(20, 152, "No contacts discovered yet.");
+    drawStr(20, 170, "Discover nodes on the NODES tab to measure");
+    drawStr(20, 186, "distance and heading to another node.");
+    return;
   }
 
-  if (fixValid) {
+  // Resolve currently selected contact in sorted list
+  if (_gps_nav_target_slot < 0 && _active_contact_idx >= 0) {
+    _gps_nav_target_slot = _active_contact_idx;
+  }
+  int selIdx = 0;
+  for (int i = 0; i < count; i++) {
+    if (items[i].contact_idx == _gps_nav_target_slot) {
+      selIdx = i;
+      break;
+    }
+  }
+  _gps_nav_target_slot = items[selIdx].contact_idx;
+  DiscoveredNodeItem* target = &items[selIdx];
+
+  // Contact Selector Row: [< PREV] (X=12..64, Y=133..153) | Target Name | [NEXT >] (X=256..308, Y=133..153)
+  _display->setColor(COLOR_BLUE_KEY);
+  _display->fillRect(12, 133, 52, 20);
+  _display->setColor(COLOR_WHITE);
+  drawStr(18, 139, "< NODE");
+
+  char targetHdr[32];
+  snprintf(targetHdr, sizeof(targetHdr), "%s%.15s (%d/%d)",
+           target->is_fav ? "*" : "", target->name, selIdx + 1, count);
+  _display->setColor(target->is_fav ? COLOR_GOLD_STAR : colTitle());
+  drawStr(70, 139, targetHdr);
+
+  _display->setColor(COLOR_BLUE_KEY);
+  _display->fillRect(256, 133, 52, 20);
+  _display->setColor(COLOR_WHITE);
+  drawStr(262, 139, "NODE >");
+
+  bool targetHasPos = (target->lat != 0 || target->lon != 0);
+  if (myHasPos && targetHasPos) {
+    double tLat = (double)target->lat / 1e6;
+    double tLon = (double)target->lon / 1e6;
+    double dist_m = calcDistanceMeters(myLat, myLon, tLat, tLon);
+    double brg = calcBearingDegrees(myLat, myLon, tLat, tLon);
+    const char* card = degToCardinal((float)brg);
+
+    // Distance line (Y = 158)
+    char distLine[50];
+    if (_gps_metric_units) {
+      if (dist_m < 1000.0) {
+        snprintf(distLine, sizeof(distLine), "DIST: %ld m (%.0f ft)",
+                 (long)(dist_m + 0.5), dist_m * 3.28084);
+      } else {
+        snprintf(distLine, sizeof(distLine), "DIST: %.2f km (%.2f mi)",
+                 dist_m / 1000.0, dist_m / 1609.344);
+      }
+    } else {
+      double dist_ft = dist_m * 3.28084;
+      if (dist_ft < 5280.0) {
+        snprintf(distLine, sizeof(distLine), "DIST: %ld ft (%ld m)",
+                 (long)(dist_ft + 0.5), (long)(dist_m + 0.5));
+      } else {
+        snprintf(distLine, sizeof(distLine), "DIST: %.2f mi (%.2f km)",
+                 dist_m / 1609.344, dist_m / 1000.0);
+      }
+    }
     _display->setColor(colText());
-    snprintf(buf, sizeof(buf), "Latitude:  %.6f deg %c", fabs(lat), lat >= 0 ? 'N' : 'S');
-    drawStr(18, 98, buf);
-    snprintf(buf, sizeof(buf), "Longitude: %.6f deg %c", fabs(lon), lon >= 0 ? 'E' : 'W');
-    drawStr(18, 112, buf);
-    snprintf(buf, sizeof(buf), "Altitude:  %ld m (%ld ft)", alt, (long)(alt * 3.28084));
-    drawStr(18, 126, buf);
+    drawStr(14, 158, distLine);
+
+    // Bearing & Relative Direction line (Y = 173)
+    char brgLine[52];
+    if (tap_gps.hasCourse()) {
+      float rel = fmod((float)brg - tap_gps.getCourseDeg() + 540.0f, 360.0f) - 180.0f;
+      const char* relWord = (fabs(rel) <= 15.0f) ? "AHEAD" :
+                            (fabs(rel) >= 165.0f) ? "BEHIND" :
+                            (rel > 0.0f ? "RIGHT" : "LEFT");
+      snprintf(brgLine, sizeof(brgLine), "BRG: %03d deg (%s) | Rel: %+d deg %s",
+               (int)(brg + 0.5) % 360, card, (int)roundf(rel), relWord);
+    } else {
+      snprintf(brgLine, sizeof(brgLine), "HEADING TO NODE: %03d deg (%s)",
+               (int)(brg + 0.5) % 360, card);
+    }
+    _display->setColor(COLOR_GOLD_STAR);
+    drawStr(14, 173, brgLine);
+
+    // Target coordinates line (Y = 188)
+    char coordLine[50];
+    snprintf(coordLine, sizeof(coordLine), "Node Pos: %.5f, %.5f", tLat, tLon);
+    _display->setColor(colSubText());
+    drawStr(14, 188, coordLine);
   } else {
     _display->setColor(colSubText());
-    drawStr(18, 98, "Latitude:  Waiting for fix...");
-    drawStr(18, 112, "Longitude: Waiting for fix...");
-    drawStr(18, 126, "Altitude:  Waiting for fix...");
+    if (!targetHasPos) {
+      drawStr(14, 162, "Selected node has no GPS coords yet.");
+      drawStr(14, 178, "Tap [REQ NODE LOC] to query its GPS.");
+    } else {
+      drawStr(14, 162, "Waiting for our local GPS fix...");
+      char coordLine[50];
+      snprintf(coordLine, sizeof(coordLine), "Node Pos: %.5f, %.5f",
+               (double)target->lat / 1e6, (double)target->lon / 1e6);
+      drawStr(14, 178, coordLine);
+    }
   }
 
-  char diag[45];
-  if (loc) loc->formatDiagnostics(diag, sizeof(diag));
-  else strcpy(diag, "en:1 sat:0 fix:0");
-  snprintf(buf, sizeof(buf), "Diag: %s", diag);
-  _display->setColor(colMutedText());
-  drawStr(18, 142, buf);
-
-  _display->setColor(colTitle());
-  snprintf(buf, sizeof(buf), "Baud: %lu", _gps_baud);
-  drawStr(18, 163, buf);
-
+  // Action buttons at bottom of Card 2 (Y = 205..229):
+  // [REQ NODE LOC] (X=12..118) | [SEND MY LOC] (X=124..228) | [DM NODE] (X=234..308)
   _display->setColor(COLOR_BLUE_KEY);
-  _display->fillRect(110, 158, 75, 20);
+  _display->fillRect(12, 205, 106, 24);
   _display->setColor(COLOR_WHITE);
-  drawStr(118, 164, "CHG BAUD");
+  drawStr(20, 213, "REQ NODE LOC");
 
-  _display->setColor(COLOR_CYAN_BTN);
-  _display->fillRect(195, 158, 107, 20);
-  _display->setColor(COLOR_BLACK);
-  drawStr(202, 164, _gps_pins_swapped ? "PINS: RX16/TX15" : "PINS: RX15/TX16");
-
-  _display->setColor(COLOR_BLUE_KEY);
-  _display->fillRect(10, 190, 190, 38);
-  _display->setColor(colBorder());
-  _display->drawRect(10, 190, 190, 38);
+  _display->setColor(COLOR_GREEN_BTN);
+  _display->fillRect(124, 205, 104, 24);
   _display->setColor(COLOR_WHITE);
-  drawStr(32, 204, "BROADCAST LOCATION");
+  drawStr(134, 213, "SEND MY LOC");
 
-  _display->setColor(hasLoc ? COLOR_GREEN_BTN : colCardBg());
-  _display->fillRect(210, 190, 100, 38);
-  _display->setColor(colBorder());
-  _display->drawRect(210, 190, 100, 38);
-  _display->setColor(hasLoc ? COLOR_WHITE : colText());
-  drawStr(226, 204, hasLoc ? "GPS: ON" : "GPS: OFF");
+  _display->setColor(COLOR_PURPLE_BTN);
+  _display->fillRect(234, 205, 74, 24);
+  _display->setColor(COLOR_WHITE);
+  drawStr(246, 213, "DM NODE");
 }
 
 void TapUI::handleGPSTouch(uint16_t tx, uint16_t ty) {
-  if (tx >= 110 && tx <= 185 && ty >= 158 && ty <= 180) {
+  // Top sub-tab bar: [ GPS TELEMETRY ] (X=8..156) | [ HEADING & NAV ] (X=164..312)
+  if (ty >= 44 && ty <= 66) {
+    if (tx >= 8 && tx <= 156) {
+      _gps_subview = 0;
+      _needs_full_redraw = true;
+      return;
+    }
+    if (tx >= 164 && tx <= 312) {
+      _gps_subview = 1;
+      _needs_full_redraw = true;
+      return;
+    }
+  }
+
+  if (_gps_subview == 0) {
+    handleGPSStatusTouch(tx, ty);
+  } else {
+    handleGPSNavTouch(tx, ty);
+  }
+}
+
+void TapUI::handleGPSStatusTouch(uint16_t tx, uint16_t ty) {
+  // [APP SHARE:ON/OFF] toggle (X=208..312, Y=69..90)
+  if (tx >= 208 && tx <= 312 && ty >= 68 && ty <= 91) {
+    setGPSShareEnabled(!isGPSShareEnabled());
+    return;
+  }
+
+  // [CHG BAUD] (X=104..180, Y=164..186)
+  if (tx >= 104 && tx <= 182 && ty >= 163 && ty <= 187) {
     int bIdx = 0;
     for (int i = 0; i < NUM_GPS_BAUDS; i++) {
       if (GPS_BAUD_OPTIONS[i] == _gps_baud) {
@@ -2361,34 +2749,148 @@ void TapUI::handleGPSTouch(uint16_t tx, uint16_t ty) {
     return;
   }
 
-  if (tx >= 195 && tx <= 302 && ty >= 158 && ty <= 180) {
+  // [PINS: RX15/TX16] (X=186..312, Y=164..186)
+  if (tx >= 186 && tx <= 312 && ty >= 163 && ty <= 187) {
     setGPSPinsSwapped(!_gps_pins_swapped, true);
     return;
   }
 
-  if (tx >= 10 && tx <= 200 && ty >= 190 && ty <= 232) {
-    LocationProvider* loc = sensors.getLocationProvider();
-    char locMsg[64];
-    if (loc && loc->isEnabled() && loc->isValid()) {
-      snprintf(locMsg, sizeof(locMsg), "[LOC] %.5f, %.5f (Alt: %ldm)",
-               (double)loc->getLatitude() / 1e6, (double)loc->getLongitude() / 1e6, loc->getAltitude());
-    } else {
-      snprintf(locMsg, sizeof(locMsg), "[LOC] Ping from WisMesh Tap");
+  // Bottom Row (Y=190..234):
+  if (ty >= 188 && ty <= 236) {
+    // [BROADCAST LOC] (X=8..122)
+    if (tx >= 8 && tx <= 122) {
+      syncGPSWithMesh();
+      the_mesh.advert();
+      LocationProvider* loc = sensors.getLocationProvider();
+      char locMsg[64];
+      if (loc && loc->isEnabled() && loc->isValid()) {
+        snprintf(locMsg, sizeof(locMsg), "[LOC] %.5f, %.5f (Alt: %ldm)",
+                 (double)loc->getLatitude() / 1e6,
+                 (double)loc->getLongitude() / 1e6,
+                 loc->getAltitude() / 1000L);
+      } else if (sensors.node_lat != 0.0 || sensors.node_lon != 0.0) {
+        snprintf(locMsg, sizeof(locMsg), "[LOC] %.5f, %.5f", sensors.node_lat, sensors.node_lon);
+      } else {
+        snprintf(locMsg, sizeof(locMsg), "[LOC] Ping from WisMesh Tap");
+      }
+      sendMessage(locMsg);
+      _current_tab = TAB_CHAT;
+      _needs_full_redraw = true;
+      return;
     }
-    sendMessage(locMsg);
-    _current_tab = TAB_CHAT;
+
+    // [HEADING / NAV] (X=126..228)
+    if (tx >= 126 && tx <= 228) {
+      _gps_subview = 1;
+      _needs_full_redraw = true;
+      return;
+    }
+
+    // [GPS: ON/OFF] (X=232..312)
+    if (tx >= 232 && tx <= 312) {
+      bool newState = !sensors.isGpsActive();
+      sensors.setGpsActive(newState);
+      NodePrefs* prefs = the_mesh.getNodePrefs();
+      if (prefs) {
+        prefs->gps_enabled = newState ? 1 : 0;
+        the_mesh.savePrefs();
+      }
+      _needs_full_redraw = true;
+      return;
+    }
+  }
+}
+
+void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
+  // Unit toggle [UNIT:KM/H] / [UNIT:MPH] (X=230..310, Y=68..92)
+  if (tx >= 230 && tx <= 310 && ty >= 68 && ty <= 92) {
+    _gps_metric_units = !_gps_metric_units;
     _needs_full_redraw = true;
     return;
   }
 
-  if (tx >= 210 && tx <= 310 && ty >= 190 && ty <= 232) {
-    LocationProvider* loc = sensors.getLocationProvider();
-    if (loc) {
-      if (loc->isEnabled()) loc->stop();
-      else loc->begin();
+  DiscoveredNodeItem items[48];
+  int count = buildSortedContactList(items, 48);
+  if (count == 0) return;
+
+  int selIdx = 0;
+  for (int i = 0; i < count; i++) {
+    if (items[i].contact_idx == _gps_nav_target_slot) {
+      selIdx = i;
+      break;
     }
-    _needs_full_redraw = true;
-    return;
+  }
+
+  // Contact Selector [< NODE] (X=10..68, Y=131..156) / [NODE >] (X=252..310, Y=131..156)
+  if (ty >= 130 && ty <= 156) {
+    if (tx >= 10 && tx <= 68) {
+      selIdx = (selIdx - 1 + count) % count;
+      _gps_nav_target_slot = items[selIdx].contact_idx;
+      _needs_full_redraw = true;
+      return;
+    }
+    if (tx >= 252 && tx <= 310) {
+      selIdx = (selIdx + 1) % count;
+      _gps_nav_target_slot = items[selIdx].contact_idx;
+      _needs_full_redraw = true;
+      return;
+    }
+  }
+
+  // Action buttons at bottom of Card 2 (Y=202..234)
+  if (ty >= 202 && ty <= 234) {
+    ContactInfo c;
+    bool validContact = the_mesh.getContactByIdx(items[selIdx].contact_idx, c);
+
+    // [REQ NODE LOC] (X=12..120) -> Request telemetry + send self-advert
+    if (tx >= 10 && tx <= 120 && validContact) {
+      uint32_t tag = 0, est_timeout = 0;
+      the_mesh.sendRequest(c, REQ_TYPE_GET_TELEMETRY_DATA, tag, est_timeout);
+      the_mesh.advert();
+      _needs_full_redraw = true;
+      return;
+    }
+
+    // [SEND MY LOC] (X=124..230) -> Send our coords/speed/heading to selected contact & advert
+    if (tx >= 122 && tx <= 230 && validContact) {
+      syncGPSWithMesh();
+      the_mesh.advert();
+      _active_contact_idx = items[selIdx].contact_idx;
+      LocationProvider* loc = sensors.getLocationProvider();
+      char locMsg[64];
+      if (loc && loc->isEnabled() && loc->isValid()) {
+        if (tap_gps.hasCourse()) {
+          snprintf(locMsg, sizeof(locMsg), "[LOC] %.5f,%.5f Spd:%.1fkm/h Hdg:%03d%s",
+                   (double)loc->getLatitude() / 1e6,
+                   (double)loc->getLongitude() / 1e6,
+                   tap_gps.getSpeedKmh(),
+                   (int)(tap_gps.getCourseDeg() + 0.5f) % 360,
+                   degToCardinal(tap_gps.getCourseDeg()));
+        } else {
+          snprintf(locMsg, sizeof(locMsg), "[LOC] %.5f, %.5f (Alt:%ldm)",
+                   (double)loc->getLatitude() / 1e6,
+                   (double)loc->getLongitude() / 1e6,
+                   loc->getAltitude() / 1000L);
+        }
+      } else if (sensors.node_lat != 0.0 || sensors.node_lon != 0.0) {
+        snprintf(locMsg, sizeof(locMsg), "[LOC] %.5f, %.5f", sensors.node_lat, sensors.node_lon);
+      } else {
+        snprintf(locMsg, sizeof(locMsg), "[LOC] Ping from WisMesh Tap");
+      }
+      sendMessage(locMsg);
+      _current_tab = TAB_CHAT;
+      _needs_full_redraw = true;
+      return;
+    }
+
+    // [DM NODE] (X=234..310) -> Open DM chat with selected contact
+    if (tx >= 232 && tx <= 310 && validContact) {
+      _active_contact_idx = items[selIdx].contact_idx;
+      _chat_scroll_offset = 0;
+      _current_tab = TAB_CHAT;
+      _needs_full_redraw = true;
+      return;
+    }
   }
 }
 

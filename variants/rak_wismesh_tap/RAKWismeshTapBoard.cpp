@@ -875,14 +875,20 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
       }
       char diag[64];
       loc->formatDiagnostics(diag, sizeof(diag));
-      snprintf(reply, 160, "%s | lat=%.6f lon=%.6f alt=%ldm | baud=%lu pins=%s",
-               diag, (double)loc->getLatitude() / 1e6, (double)loc->getLongitude() / 1e6,
-               loc->getAltitude(), (unsigned long)ui.getGPSBaud(),
-               ui.areGPSPinsSwapped() ? "RX16/TX15" : "RX15/TX16");
+      long alt_m = loc->getAltitude() / 1000L;
+      snprintf(reply, 160, "%s | lat=%.6f lon=%.6f alt=%ldm spd=%.1fkm/h hdg=%03d(%s) share=%s",
+               diag,
+               loc->isValid() ? ((double)loc->getLatitude() / 1e6) : sensors.node_lat,
+               loc->isValid() ? ((double)loc->getLongitude() / 1e6) : sensors.node_lon,
+               alt_m,
+               tap_gps.getSpeedKmh(),
+               tap_gps.hasCourse() ? ((int)(tap_gps.getCourseDeg() + 0.5f) % 360) : 0,
+               tap_gps.hasCourse() ? TapUI::degToCardinal(tap_gps.getCourseDeg()) : "--",
+               ui.isGPSShareEnabled() ? "ON" : "OFF");
       return true;
     }
     if (strcmp(sub, "on") == 0) {
-      if (loc) loc->begin();
+      sensors.setGpsActive(true);
       prefs->gps_enabled = 1;
       the_mesh.savePrefs();
       ui.markNeedsRedraw();
@@ -890,11 +896,50 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
       return true;
     }
     if (strcmp(sub, "off") == 0) {
-      if (loc) loc->stop();
+      sensors.setGpsActive(false);
       prefs->gps_enabled = 0;
       the_mesh.savePrefs();
       ui.markNeedsRedraw();
       strcpy(reply, "OK - GPS disabled");
+      return true;
+    }
+    if (memcmp(sub, "share", 5) == 0) {
+      const char* arg = sub + 5;
+      while (*arg == ' ') arg++;
+      if (*arg == 0) {
+        snprintf(reply, 80, "> GPS App/Mesh Share: %s", ui.isGPSShareEnabled() ? "ON" : "OFF");
+        return true;
+      }
+      bool sh = (strcasecmp(arg, "on") == 0 || strcmp(arg, "1") == 0);
+      ui.setGPSShareEnabled(sh);
+      snprintf(reply, 80, "OK - GPS App/Mesh Share set to %s", sh ? "ON" : "OFF");
+      return true;
+    }
+    if (memcmp(sub, "nav", 3) == 0) {
+      double myLat = (loc && loc->isValid()) ? ((double)loc->getLatitude() / 1e6) : sensors.node_lat;
+      double myLon = (loc && loc->isValid()) ? ((double)loc->getLongitude() / 1e6) : sensors.node_lon;
+      Serial.printf("\r\n=== GPS Navigation (Me: %.6f, %.6f | Spd: %.1f km/h / %.1f mph | Hdg: %03d deg %s) ===\r\n",
+                    myLat, myLon, tap_gps.getSpeedKmh(), tap_gps.getSpeedMph(),
+                    tap_gps.hasCourse() ? ((int)(tap_gps.getCourseDeg() + 0.5f) % 360) : 0,
+                    tap_gps.hasCourse() ? TapUI::degToCardinal(tap_gps.getCourseDeg()) : "STATIC");
+      int total = the_mesh.getTotalContactSlots();
+      for (int i = 8; i < total; i++) {
+        ContactInfo c;
+        if (the_mesh.getContactByIdx(i, c) && c.type != 0 && (c.gps_lat != 0 || c.gps_lon != 0)) {
+          double tLat = (double)c.gps_lat / 1e6;
+          double tLon = (double)c.gps_lon / 1e6;
+          double d_m = TapUI::calcDistanceMeters(myLat, myLon, tLat, tLon);
+          double brg = TapUI::calcBearingDegrees(myLat, myLon, tLat, tLon);
+          Serial.printf(" [%2d] %-18s : Dist %.2f km (%.2f mi) | Brg %03d deg (%s) | Pos %.5f, %.5f\r\n",
+                        i, c.name, d_m / 1000.0, d_m / 1609.344,
+                        (int)(brg + 0.5) % 360, TapUI::degToCardinal((float)brg), tLat, tLon);
+        }
+      }
+      snprintf(reply, 140, "Spd: %.1f km/h (%.1f mph) | Hdg: %03d deg (%s) | Pos: %.5f, %.5f",
+               tap_gps.getSpeedKmh(), tap_gps.getSpeedMph(),
+               tap_gps.hasCourse() ? ((int)(tap_gps.getCourseDeg() + 0.5f) % 360) : 0,
+               tap_gps.hasCourse() ? TapUI::degToCardinal(tap_gps.getCourseDeg()) : "--",
+               myLat, myLon);
       return true;
     }
     if (strcmp(sub, "sync") == 0) {
@@ -920,9 +965,13 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
     if (memcmp(sub, "setloc ", 7) == 0) {
       double lat = 0.0, lon = 0.0;
       if (sscanf(sub + 7, "%lf %lf", &lat, &lon) == 2) {
+        sensors.node_lat = lat;
+        sensors.node_lon = lon;
         prefs->node_lat = lat;
         prefs->node_lon = lon;
+        prefs->advert_loc_policy = ADVERT_LOC_SHARE;
         the_mesh.savePrefs();
+        ui.markNeedsRedraw();
         snprintf(reply, 100, "OK - Node coordinates set to %.6f, %.6f", lat, lon);
       } else {
         strcpy(reply, "Usage: gps setloc <lat> <lon>");
@@ -1102,14 +1151,20 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
       return true;
     }
     if (memcmp(config, "lat ", 4) == 0) {
-      prefs->node_lat = atof(config + 4);
+      double lat = atof(config + 4);
+      sensors.node_lat = lat;
+      prefs->node_lat = lat;
       the_mesh.savePrefs();
+      ui.markNeedsRedraw();
       strcpy(reply, "OK");
       return true;
     }
     if (memcmp(config, "lon ", 4) == 0) {
-      prefs->node_lon = atof(config + 4);
+      double lon = atof(config + 4);
+      sensors.node_lon = lon;
+      prefs->node_lon = lon;
       the_mesh.savePrefs();
+      ui.markNeedsRedraw();
       strcpy(reply, "OK");
       return true;
     }

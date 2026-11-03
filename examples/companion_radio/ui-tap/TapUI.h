@@ -123,9 +123,15 @@ private:
   // Nodes scroll / page offset
   int _nodes_page;
 
-  // GPS Settings
+  // GPS Settings & Navigation state
   uint32_t _gps_baud;
   bool _gps_pins_swapped;
+  uint8_t _gps_subview;      // 0 = Status & Config, 1 = Heading/Speed & Target Node Nav
+  int _gps_nav_target_slot;  // Contact slot index (8..total_slots-1) for distance/bearing, or -1
+  bool _gps_metric_units;    // true = km/h & km/m, false = mph & mi/ft
+  bool _gps_fix_saved_once;
+  unsigned long _last_gps_save_ms;
+  unsigned long _last_gps_ui_refresh_ms;
 
   // Radio adjustment parameters & presets
   int _selected_preset_idx; // 0..NUM_PRESETS (last is Custom)
@@ -163,6 +169,8 @@ private:
   void drawChansScreen();
   void drawChannelEditor();
   void drawGPSScreen();
+  void drawGPSStatusView();
+  void drawGPSNavView();
   void drawRadioScreen();
   void drawRadioRFView();
   void drawRadioDeviceView();
@@ -175,6 +183,9 @@ private:
   void handleChansTouch(uint16_t tx, uint16_t ty);
   void handleChannelEditorTouch(uint16_t tx, uint16_t ty);
   void handleGPSTouch(uint16_t tx, uint16_t ty);
+  void handleGPSStatusTouch(uint16_t tx, uint16_t ty);
+  void handleGPSNavTouch(uint16_t tx, uint16_t ty);
+  void syncGPSWithMesh();
   void handleRadioTouch(uint16_t tx, uint16_t ty);
   void handleRadioRFTouch(uint16_t tx, uint16_t ty);
   void handleRadioDeviceTouch(uint16_t tx, uint16_t ty);
@@ -263,6 +274,11 @@ public:
   void setGPSBaud(uint32_t baud, bool persist = true);
   bool areGPSPinsSwapped() const { return _gps_pins_swapped; }
   void setGPSPinsSwapped(bool swapped, bool persist = true);
+  bool isGPSShareEnabled() const;
+  void setGPSShareEnabled(bool share);
+  static const char* degToCardinal(float deg);
+  static double calcDistanceMeters(double lat1, double lon1, double lat2, double lon2);
+  static double calcBearingDegrees(double lat1, double lon1, double lat2, double lon2);
 
   // Messaging
   void addReceivedMessage(const char* sender, const char* text, bool isDirect, const uint8_t* pubkey = nullptr);
