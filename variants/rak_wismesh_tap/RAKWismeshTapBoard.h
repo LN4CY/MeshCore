@@ -24,6 +24,9 @@ class RAKWismeshTapBoard : public NRF52BoardDCDC {
 private:
   uint32_t _last_heartbeat = 0;
   uint32_t _heartbeat_off_time = 0;
+  uint8_t _brightness_pct = 100;
+  bool _backlight_on = true;
+  float _adc_mult = 0.0f;
 
 protected:
 #ifdef NRF52_POWER_MANAGEMENT
@@ -40,6 +43,16 @@ public:
   void onAfterTransmit() override;
   void onBootComplete() override;
   void powerOff() override;
+  bool handleCommand(const char* command, uint32_t sender_timestamp, char* reply) override;
+
+  bool setAdcMultiplier(float multiplier) override {
+    _adc_mult = multiplier;
+    return true;
+  }
+
+  float getAdcMultiplier() const override {
+    return (_adc_mult > 0.0f) ? _adc_mult : (float)(ADC_MULTIPLIER) / 1000.0f;
+  }
 
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);
@@ -50,12 +63,14 @@ public:
     }
     raw = raw / BATTERY_SAMPLES;
 
-    return (ADC_MULTIPLIER * raw) / 4096;
+    float mult = (_adc_mult > 0.0f) ? (_adc_mult * 1000.0f) : (float)ADC_MULTIPLIER;
+    return (uint16_t)((mult * raw) / 4096.0f);
   }
 
-  void setBacklight(bool on) {
-    digitalWrite(PIN_TFT_BL, on ? HIGH : LOW);
-  }
+  void setBacklight(bool on);
+  void setBacklightBrightness(uint8_t pct);
+  uint8_t getBacklightBrightness() const { return _brightness_pct; }
+  bool isBacklightOn() const { return _backlight_on; }
 
   void setSlotPower(bool on) {
     digitalWrite(PIN_WISBLOCK_3V3_S, on ? HIGH : LOW);

@@ -28,6 +28,7 @@ public:
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;
+  TapUI& getUI() { return _ui; }
 
   // MyMesh::Listener overrides
   void onMessageRecv(mesh::Packet *pkt, const ContactInfo &from, uint8_t txt_type, uint32_t sender_timestamp, const char* text) override;
