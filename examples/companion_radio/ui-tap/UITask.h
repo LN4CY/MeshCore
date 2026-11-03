@@ -4,22 +4,15 @@
 #include <helpers/ui/DisplayDriver.h>
 #include <helpers/SensorManager.h>
 #include <helpers/MultiSerialInterface.h>
-#include <helpers/InterTaskMailboxInterface.h>
+#include <helpers/ui/MomentaryButton.h>
 #include <Arduino.h>
 
 #include "../AbstractUITask.h"
 #include "../NodePrefs.h"
 #include "../MyMesh.h"
-#include "TapClient.h"
 #include "TapUI.h"
 
-#if defined(NRF52_PLATFORM)
-  #include <FreeRTOS.h>
-  #include <task.h>
-#elif defined(ESP32)
-  #include <freertos/FreeRTOS.h>
-  #include <freertos/task.h>
-#endif
+extern MomentaryButton user_btn;
 
 class UITask : public AbstractUITask {
 private:
@@ -27,13 +20,7 @@ private:
   SensorManager* _sensors;
   NodePrefs* _node_prefs;
 
-  TapClient _client;
   TapUI _ui;
-
-  TaskHandle_t _ui_task_handle;
-  unsigned long _last_batt_check;
-
-  static void uiTaskRunner(void* pvParameters);
 
 public:
   UITask(mesh::MainBoard* board, MultiSerialInterface* serial);
@@ -49,6 +36,4 @@ public:
   void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
   void onControlDataRecv(const mesh::Packet* pkt) override;
   void onACKRecv(uint32_t ack_crc) override;
-
-  void updateUI();
 };

@@ -828,6 +828,18 @@ void EnvironmentSensorManager::rakGPSInit(){
 
 bool EnvironmentSensorManager::gpsIsAwake(uint8_t ioPin){
 
+  #if defined(RAK_WISMESH_TAP)
+  // On RAK WisMesh Tap:
+  // WB_IO2 is 3V3_S slot power (must stay HIGH to power TFT display and IO slot)
+  // WB_IO3 is TFT Backlight
+  // WB_IO4 is TFT DC
+  // WB_IO5 is TFT RST
+  // Do NOT manipulate these display pins as GPS pins!
+  if (ioPin == WB_IO2 || ioPin == WB_IO3 || ioPin == WB_IO4 || ioPin == WB_IO5) {
+    return false;
+  }
+  #endif
+
   #if defined(ETHERNET_ENABLED) && defined(RAK_BOARD)
     if (ioPin == WB_IO2) {
       // WB_IO2 powers the Ethernet module on RAK baseboards.
