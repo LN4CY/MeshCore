@@ -52,6 +52,7 @@ void RAKWismeshTapBoard::begin() {
   // Turn on WisBlock 3V3_S slot power (WB_IO2 / Pin 34)
   pinMode(PIN_WISBLOCK_3V3_S, OUTPUT);
   digitalWrite(PIN_WISBLOCK_3V3_S, HIGH);
+  delay(30); // Allow WisBlock IO slot 3.3V rail to stabilize
 
   // Keep Touch controller (FT6336U) out of reset (WB_IO1 / Pin 17)
   pinMode(PIN_TOUCH_RST, OUTPUT);

@@ -2247,12 +2247,54 @@ void MyMesh::checkCLIRescueCmd() {
       Serial.println("  get tx               - Show LoRa TX power");
       Serial.println("  set radio <f> <b> <s> <c> - Set radio config");
       Serial.println("  set pin <pin>        - Set BLE PIN");
+      Serial.println("  bl <0|1>             - Turn Backlight off (0) or on (1)");
+      Serial.println("  slot <0|1>           - Turn 3V3_S slot power off (0) or on (1)");
+      Serial.println("  screen test          - Draw test bars & text on LCD");
+      Serial.println("  screen <red|green|blue|white|black> - Fill LCD screen");
       Serial.println("  ls UserData          - List stored files");
       Serial.println("  cat <path>           - Print file content");
       Serial.println("  rm <path>            - Delete file");
       Serial.println("  rebuild              - Reset storage & rebuild index");
       Serial.println("  reboot               - Reboot device");
       Serial.println("  help / ?             - Show this help menu\r\n");
+    } else if (strncmp(cli_command, "bl ", 3) == 0) {
+      int val = atoi(cli_command + 3);
+      pinMode(21, OUTPUT);
+      digitalWrite(21, val ? HIGH : LOW);
+      Serial.printf("  > Backlight (pin 21) set to %d\r\n", val ? 1 : 0);
+    } else if (strncmp(cli_command, "slot ", 5) == 0) {
+      int val = atoi(cli_command + 5);
+      pinMode(34, OUTPUT);
+      digitalWrite(34, val ? HIGH : LOW);
+      Serial.printf("  > Slot power 3V3_S (pin 34) set to %d\r\n", val ? 1 : 0);
+    } else if (strncmp(cli_command, "screen ", 7) == 0) {
+      const char* col = cli_command + 7;
+#ifdef DISPLAY_CLASS
+      if (strcmp(col, "test") == 0) {
+        display.getAdafruitDisplay().fillScreen(0x0000);
+        display.getAdafruitDisplay().fillRect(0, 0, 64, 240, 0xF800);   // Red
+        display.getAdafruitDisplay().fillRect(64, 0, 64, 240, 0x07E0);  // Green
+        display.getAdafruitDisplay().fillRect(128, 0, 64, 240, 0x001F); // Blue
+        display.getAdafruitDisplay().fillRect(192, 0, 64, 240, 0xFFE0); // Yellow
+        display.getAdafruitDisplay().fillRect(256, 0, 64, 240, 0xFFFF); // White
+        display.getAdafruitDisplay().setTextColor(0x0000, 0xFFFF);
+        display.getAdafruitDisplay().setTextSize(2);
+        display.getAdafruitDisplay().setCursor(40, 110);
+        display.getAdafruitDisplay().print(" WisMesh Tap V1 ");
+        Serial.println("  > Display test pattern drawn (RGBYW bars + text)");
+      } else {
+        uint16_t c = 0xFFFF;
+        if (strcmp(col, "red") == 0) c = 0xF800;
+        else if (strcmp(col, "green") == 0) c = 0x07E0;
+        else if (strcmp(col, "blue") == 0) c = 0x001F;
+        else if (strcmp(col, "black") == 0) c = 0x0000;
+        else if (strcmp(col, "white") == 0) c = 0xFFFF;
+        display.getAdafruitDisplay().fillScreen(c);
+        Serial.printf("  > Screen filled with color 0x%04X (%s)\r\n", c, col);
+      }
+#else
+      Serial.println("  > Display not compiled in");
+#endif
     } else if (strcmp(cli_command, "rebuild") == 0) {
       bool success = _store->formatFileSystem();
       if (success) {

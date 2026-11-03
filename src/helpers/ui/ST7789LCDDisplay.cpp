@@ -8,12 +8,17 @@
   #define DISPLAY_ROTATION 3
 #endif
 
-#ifndef DISPLAY_SCALE_X
-  #define DISPLAY_SCALE_X 2.5f // 320 / 128
-#endif
+#if defined(RAK_WISMESH_TAP)
+  #define DISPLAY_SCALE_X 1.0f
+  #define DISPLAY_SCALE_Y 1.0f
+#else
+  #ifndef DISPLAY_SCALE_X
+    #define DISPLAY_SCALE_X 2.5f // 320 / 128
+  #endif
 
-#ifndef DISPLAY_SCALE_Y
-  #define DISPLAY_SCALE_Y 3.75f // 240 / 64
+  #ifndef DISPLAY_SCALE_Y
+    #define DISPLAY_SCALE_Y 3.75f // 240 / 64
+  #endif
 #endif
 
 #define DISPLAY_WIDTH 240
@@ -38,18 +43,22 @@ bool ST7789LCDDisplay::begin() {
   if (!_isOn) {
     if (_peripher_power) _peripher_power->claim();
 
+    Serial.println("[DISPLAY] ST7789LCDDisplay::begin() starting...");
     if (PIN_TFT_LEDA_CTL != -1) {
       pinMode(PIN_TFT_LEDA_CTL, OUTPUT);
       digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
+      Serial.printf("[DISPLAY] Backlight pin %d driven HIGH\r\n", PIN_TFT_LEDA_CTL);
     }
 
     #if defined(LILYGO_TDECK) || defined(HELTEC_LORA_V4_TFT) || defined(HELTEC_V4_R8_TFT)
       displaySPI.begin(PIN_TFT_SCL, PIN_TFT_MISO, PIN_TFT_SDA, PIN_TFT_CS);
     #elif defined(RAK_WISMESH_TAP)
+      Serial.printf("[DISPLAY] Initializing SPI1 (MISO=%d, SCK=%d, MOSI=%d)...\r\n", PIN_SPI1_MISO, PIN_SPI1_SCK, PIN_SPI1_MOSI);
       SPI1.setPins(PIN_SPI1_MISO, PIN_SPI1_SCK, PIN_SPI1_MOSI);
       SPI1.begin();
     #endif
 
+    Serial.printf("[DISPLAY] Initializing ST7789 (%dx%d), rotation=%d...\r\n", DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_ROTATION);
     display.init(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     display.setRotation(DISPLAY_ROTATION);
 
@@ -65,6 +74,7 @@ bool ST7789LCDDisplay::begin() {
     display.cp437(true); // Use full 256 char 'Code Page 437' font
   
     _isOn = true;
+    Serial.println("[DISPLAY] ST7789LCDDisplay initialized successfully!");
   }
 
   return true;

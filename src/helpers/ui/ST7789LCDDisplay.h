@@ -50,6 +50,8 @@ public:
 #endif
   bool begin();
 
+  Adafruit_ST7789& getAdafruitDisplay() { return display; }
+
   bool isOn() override { return _isOn; }
   void turnOn() override;
   void turnOff() override;

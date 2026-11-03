@@ -166,11 +166,13 @@ void setup() {
   DisplayDriver* disp = NULL;
   if (display.begin()) {
     disp = &display;
-    disp->startFrame();
-  #ifdef ST7789
+    disp->startFrame(UIColor::window_bkg);
+    disp->setColor(UIColor::corp_blue);
     disp->setTextSize(2);
-  #endif
-    disp->drawTextCentered(disp->width() / 2, 28, "Loading...");
+    disp->drawTextCentered(disp->width() / 2, 28, "WisMesh Tap");
+    disp->setColor(UIColor::primary_txt);
+    disp->setTextSize(1);
+    disp->drawTextCentered(disp->width() / 2, 60, "MeshCore Booting...");
     disp->endFrame();
   }
 #endif
