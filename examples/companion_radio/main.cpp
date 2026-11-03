@@ -119,7 +119,29 @@ MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store);
 /* END GLOBAL OBJECTS */
 
 void halt() {
-  while (1) ;
+  Serial.println("\r\n[FATAL] Hardware initialization failed! Halting...");
+#ifdef DISPLAY_CLASS
+  display.startFrame();
+  display.setColor(UIColor::warning_txt);
+  display.setTextSize(2);
+  display.drawTextCentered(display.width() / 2, 28, "Boot Failed!");
+  display.setTextSize(1);
+  display.setColor(UIColor::primary_txt);
+  display.drawTextCentered(display.width() / 2, 55, "Radio Init / HW Error");
+  display.endFrame();
+#endif
+  while (1) {
+    #if defined(LED_GREEN) && defined(LED_BLUE)
+      digitalWrite(LED_GREEN, HIGH);
+      digitalWrite(LED_BLUE, LOW);
+      delay(120);
+      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_BLUE, HIGH);
+      delay(120);
+    #else
+      delay(200);
+    #endif
+  }
 }
 
 /* WIFI RECONNECT TRACKERS */

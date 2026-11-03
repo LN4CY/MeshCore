@@ -18,6 +18,10 @@
 #define PIN_TOUCH_RST       17  // WB_IO1 (P0.17) - Touch Reset
 
 class RAKWismeshTapBoard : public NRF52BoardDCDC {
+private:
+  uint32_t _last_heartbeat = 0;
+  uint32_t _heartbeat_off_time = 0;
+
 protected:
 #ifdef NRF52_POWER_MANAGEMENT
   void initiateShutdown(uint8_t reason) override;
@@ -27,6 +31,11 @@ public:
   RAKWismeshTapBoard() : NRF52Board("WisMeshTap_OTA") {}
 
   void begin();
+  void loop() override;
+  void sleep(uint32_t secs) override;
+  void onBeforeTransmit() override;
+  void onAfterTransmit() override;
+  void onBootComplete() override;
 
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);
@@ -46,6 +55,14 @@ public:
 
   void setSlotPower(bool on) {
     digitalWrite(PIN_WISBLOCK_3V3_S, on ? HIGH : LOW);
+  }
+
+  void setLedGreen(bool on) {
+    digitalWrite(LED_GREEN, on ? HIGH : LOW);
+  }
+
+  void setLedBlue(bool on) {
+    digitalWrite(LED_BLUE, on ? HIGH : LOW);
   }
 
   const char* getManufacturerName() const override {

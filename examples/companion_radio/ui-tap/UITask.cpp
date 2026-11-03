@@ -23,26 +23,30 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _sensors = sensors;
   _node_prefs = node_prefs;
 
+  Serial.println("[BOOT] Initializing InterTaskMailboxInterface...");
   // 1. Initialize the inter-task mailbox queue
   mailbox_interface.begin(16);
 
   // 2. Register mailbox as a serial interface into MultiSerialInterface
   if (_interfaceManager) {
     _interfaceManager->addInterface(InterfaceType::Mailbox, &mailbox_interface);
+    Serial.println("[BOOT] Mailbox registered with MultiSerialInterface.");
   }
 
   // 3. Initialize UI engine with the ST7789 display and sensors
+  Serial.println("[BOOT] Initializing TapUI and FT6336 touch controller...");
   _ui.begin(display, sensors);
   _ui.setBatteryMilliVolts(getBattMilliVolts());
 
-  // 4. Create the dedicated FreeRTOS UI Task (Priority: Low / 1)
-  // This guarantees that radio interrupts and LoRa packet processing (Priority: 2/3)
-  // will preempt the UI rendering whenever necessary.
-#if defined(NRF52_PLATFORM)
-  xTaskCreate(uiTaskRunner, "TapUI_Task", 2560, this, TASK_PRIO_LOW, &_ui_task_handle);
-#elif defined(ESP32)
+  // 4. On dual-core ESP32, pin UI to core 1.
+  // On single-core nRF52840, running cooperatively via loop() ensures zero task starvation
+  // and eliminates heap overhead.
+#if defined(ESP32)
   xTaskCreatePinnedToCore(uiTaskRunner, "TapUI_Task", 3072, this, 1, &_ui_task_handle, 1);
+#else
+  _ui_task_handle = nullptr;
 #endif
+  Serial.println("[BOOT] UITask initialized successfully.");
 }
 
 void UITask::notify(UIEventType t) {
@@ -85,7 +89,7 @@ void UITask::loop() {
     _ui.setBatteryMilliVolts(getBattMilliVolts());
   }
 
-  // Fallback: If FreeRTOS task creation was not enabled, run cooperative update here
+  // If separate FreeRTOS task is not running, run cooperative update here
   if (!_ui_task_handle) {
     updateUI();
   }

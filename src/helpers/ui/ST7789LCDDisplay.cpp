@@ -43,15 +43,21 @@ bool ST7789LCDDisplay::begin() {
       digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
     }
 
-    // Im not sure if this is just a t-deck problem or not, if your display is slow try this.
     #if defined(LILYGO_TDECK) || defined(HELTEC_LORA_V4_TFT) || defined(HELTEC_V4_R8_TFT)
       displaySPI.begin(PIN_TFT_SCL, PIN_TFT_MISO, PIN_TFT_SDA, PIN_TFT_CS);
+    #elif defined(RAK_WISMESH_TAP)
+      SPI1.setPins(PIN_SPI1_MISO, PIN_SPI1_SCK, PIN_SPI1_MOSI);
+      SPI1.begin();
     #endif
 
     display.init(DISPLAY_WIDTH, DISPLAY_HEIGHT);
     display.setRotation(DISPLAY_ROTATION);
 
-    display.setSPISpeed(40e6);
+    #if defined(RAK_WISMESH_TAP)
+      display.setSPISpeed(8000000);
+    #else
+      display.setSPISpeed(40e6);
+    #endif
 
     display.fillScreen(ST77XX_BLACK);
     display.setTextColor(ST77XX_WHITE);

@@ -29,8 +29,16 @@ AutoDiscoverRTCClock rtc_clock(fallback_clock);
 #endif
 
 bool radio_init() {
+  Serial.println("[BOOT] Probing RTC clock...");
   rtc_clock.begin(Wire);
-  return radio.std_init(&SPI);
+  Serial.println("[BOOT] Initializing SX1262 LoRa radio via SPI...");
+  bool res = radio.std_init(&SPI);
+  if (!res) {
+    Serial.println("[ERROR] SX1262 radio initialization failed!");
+  } else {
+    Serial.println("[BOOT] SX1262 LoRa radio initialized successfully!");
+  }
+  return res;
 }
 
 mesh::LocalIdentity radio_new_identity() {

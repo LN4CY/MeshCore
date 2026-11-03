@@ -86,13 +86,20 @@ static const uint8_t AREF = PIN_AREF;
 #define PIN_SERIAL2_RX (19)
 #define PIN_SERIAL2_TX (20)
 
-// WisBlock SPI Interface (ST7789 display)
-#define SPI_INTERFACES_COUNT 1
-#define PIN_SPI_MISO (29)
-#define PIN_SPI_MOSI (30)
-#define PIN_SPI_SCK (3)
+// SPI Interfaces
+// SPI (SPIM3) is dedicated to internal SX1262 LoRa module
+// SPI1 (SPIM2) is dedicated to WisBlock Base IO Slot (ST7789 display)
+#define SPI_INTERFACES_COUNT 2
 
-static const uint8_t SS = 26;
+#define PIN_SPI_MISO (45)
+#define PIN_SPI_MOSI (44)
+#define PIN_SPI_SCK (43)
+
+#define PIN_SPI1_MISO (29)
+#define PIN_SPI1_MOSI (30)
+#define PIN_SPI1_SCK (3)
+
+static const uint8_t SS = 42;
 static const uint8_t MOSI = PIN_SPI_MOSI;
 static const uint8_t MISO = PIN_SPI_MISO;
 static const uint8_t SCK = PIN_SPI_SCK;
