@@ -36,6 +36,7 @@ public:
   void onBeforeTransmit() override;
   void onAfterTransmit() override;
   void onBootComplete() override;
+  void powerOff() override;
 
   uint16_t getBattMilliVolts() override {
     analogReadResolution(12);

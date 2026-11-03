@@ -342,16 +342,9 @@ void TapUI::update() {
   }
 
   TouchPoint pt;
-  if (_touch.poll(pt)) {
-    if (pt.isPressed) {
-      if (!_touch_is_down) {
-        _touch_is_down = true;
-        _touch_down_ms = now;
-      }
-    } else {
-      _touch_is_down = false;
-    }
-
+  _touch.poll(pt);  // NOTE: poll() returns false on release, so always inspect pt fields
+  _touch_is_down = pt.isPressed;
+  {
     if (pt.justPressed) {
       _last_activity_ms = now;
 
@@ -379,12 +372,7 @@ void TapUI::update() {
     }
   }
 
-  // Check 3-second long touch in Status Bar (Y < 20) for Power Off
-  if (_touch_is_down && (now - _touch_down_ms >= 3000)) {
-    _touch_is_down = false;
-    powerOff();
-    return;
-  }
+  // Power off is only via the RADIO tab [POWER OFF] button or a 3 s hold of the physical button.
 
   // Smooth selective redraws
   if (_needs_full_redraw) {

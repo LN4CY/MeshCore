@@ -104,6 +104,43 @@ void RAKWismeshTapBoard::onAfterTransmit() {
   digitalWrite(LED_BLUE, LOW);  // Blue LED OFF after LoRa transmit
 }
 
+void RAKWismeshTapBoard::powerOff() {
+  Serial.println("[POWER] User power off requested");
+  setBacklight(false);
+  digitalWrite(LED_GREEN, LOW);
+  digitalWrite(LED_BLUE, LOW);
+
+#if defined(PIN_USER_BTN) && (PIN_USER_BTN >= 0)
+  // Wait for the user button to be released (active LOW), otherwise the
+  // wake-on-LOW sense would immediately wake us back up.
+  pinMode(PIN_USER_BTN, INPUT_PULLUP);
+  uint32_t t0 = millis();
+  while (digitalRead(PIN_USER_BTN) == LOW && millis() - t0 < 10000) {
+    delay(10);
+  }
+  delay(50); // debounce
+#endif
+
+  setSlotPower(false);
+
+  NRF52Board::shutdownPeripherals();
+  digitalWrite(SX126X_POWER_EN, LOW);
+
+#if defined(PIN_USER_BTN) && (PIN_USER_BTN >= 0)
+  // Arm wake from SYSTEMOFF on user button press
+  nrf_gpio_cfg_sense_input(PIN_USER_BTN, NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+#endif
+
+  uint8_t sd_enabled = 0;
+  sd_softdevice_is_enabled(&sd_enabled);
+  if (sd_enabled) {
+    sd_power_system_off();
+  } else {
+    NRF_POWER->SYSTEMOFF = POWER_SYSTEMOFF_SYSTEMOFF_Enter;
+  }
+  while (1) { }
+}
+
 void RAKWismeshTapBoard::onBootComplete() {
   Serial.println("[BOOT] MeshCore boot sequence completed successfully! UI ready.");
   // Visual signal: 2 rapid green blinks
