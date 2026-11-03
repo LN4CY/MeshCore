@@ -56,7 +56,7 @@ void UITask::onQueueSizeChanged(int msgcount) {
 void UITask::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
   Serial.printf("[UI] Discovered contact: %s (lat=%ld lon=%ld)\r\n",
                 contact.name, (long)contact.gps_lat, (long)contact.gps_lon);
-  if (_ui.getCurrentTab() == TAB_NODES || _ui.getCurrentTab() == TAB_GPS) {
+  if (_ui.getCurrentTab() == TAB_NODES) {
     _ui.markNeedsRedraw();
   }
 }

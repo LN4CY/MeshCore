@@ -71,6 +71,8 @@ struct TapDeviceSettings {
   uint8_t dark_mode; // 1 = dark theme (default), 0 = light theme
   uint32_t screen_sleep_secs;
   uint32_t gps_baud;
+  int8_t tz_offset;
+  uint8_t tz_configured;
 };
 
 class TapUI {
@@ -84,11 +86,14 @@ private:
   TapEditMode _edit_mode;
   bool _needs_full_redraw;
   bool _needs_chat_messages_redraw;
+  bool _needs_tabbar_redraw;
   unsigned long _last_status_ms;
   bool _backlight_on;
   uint8_t _brightness_pct;
   bool _ble_enabled;
   bool _dark_mode;
+  int8_t _tz_offset;
+  bool _tz_configured;
 
   // Power & Sleep Management
   uint32_t _screen_sleep_seconds; // 30, 60, 120, 300, 0=never
@@ -132,6 +137,7 @@ private:
   bool _gps_fix_saved_once;
   unsigned long _last_gps_save_ms;
   unsigned long _last_gps_ui_refresh_ms;
+  uint32_t _last_gps_card_hash;
 
   // Radio adjustment parameters & presets
   int _selected_preset_idx; // 0..NUM_PRESETS (last is Custom)
@@ -171,6 +177,7 @@ private:
   void drawGPSScreen();
   void drawGPSStatusView();
   void drawGPSNavView();
+  void refreshGPSDataOnly();
   void drawRadioScreen();
   void drawRadioRFView();
   void drawRadioDeviceView();
@@ -236,6 +243,8 @@ public:
   void clearBLEBonds();
 
   // Clock & Timezone helpers
+  int8_t getTimezoneOffset() const;
+  void setTimezoneOffset(int8_t tz, bool persist = true);
   void formatLocalDateTime(char* out, size_t max_len, bool include_date = true, bool include_tz = false) const;
   bool parseAndSetLocalDateTime(const char* str);
   bool syncClockFromGPS();

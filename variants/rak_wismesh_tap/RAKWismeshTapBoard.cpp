@@ -275,11 +275,11 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
     return true;
   }
   if (strcmp(command, "status") == 0) {
-    char dtStr[32];
-    ui.formatLocalDateTime(dtStr, sizeof(dtStr), true, false);
+    char dtStr[36];
+    ui.formatLocalDateTime(dtStr, sizeof(dtStr), true, true);
     uint16_t mv = getBattMilliVolts();
     uint8_t bpct = TapUI::calcBatteryPercent(mv);
-    snprintf(reply, 160, "Node:%s | %.3fMHz SF%u BW%.1f TX%udBm %uB | Batt:%u%%(%umV) | BLE:%s(PIN:%06lu) | Theme:%s | %s UTC",
+    snprintf(reply, 160, "Node:%s | %.3fMHz SF%u BW%.1f TX%udBm %uB | Batt:%u%%(%umV) | BLE:%s(PIN:%06lu) | Theme:%s | %s",
              prefs->node_name, prefs->freq, prefs->sf, prefs->bw, prefs->tx_power_dbm, prefs->path_hash_mode + 1,
              bpct, mv, ui.isBLEEnabled() ? "ON" : "OFF", (unsigned long)the_mesh.getBLEPin(),
              ui.isDarkMode() ? "DARK" : "LIGHT", dtStr);
@@ -440,6 +440,20 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
       }
       return true;
     }
+    if (memcmp(sub, "tz", 2) == 0) {
+      const char* p = sub + 2;
+      while (*p == ' ') p++;
+      if (*p == 0) {
+        snprintf(reply, 80, "Timezone: UTC%+d", (int)ui.getTimezoneOffset());
+      } else {
+        int tz = atoi(p);
+        ui.setTimezoneOffset((int8_t)tz, true);
+        char dtStr[36];
+        ui.formatLocalDateTime(dtStr, sizeof(dtStr), true, true);
+        snprintf(reply, 120, "OK - timezone set to UTC%+d (%s)", (int)ui.getTimezoneOffset(), dtStr);
+      }
+      return true;
+    }
     if (memcmp(sub, "adjust ", 7) == 0) {
       int32_t delta = atol(sub + 7);
       ui.adjustClockSeconds(delta);
@@ -448,6 +462,20 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
       snprintf(reply, 120, "OK - adjusted by %ld s -> %s", (long)delta, dtStr);
       return true;
     }
+  }
+  if (strcmp(command, "tz") == 0) {
+    char dtStr[36];
+    ui.formatLocalDateTime(dtStr, sizeof(dtStr), true, true);
+    snprintf(reply, 120, "Timezone: UTC%+d | Local time: %s", (int)ui.getTimezoneOffset(), dtStr);
+    return true;
+  }
+  if (memcmp(command, "tz ", 3) == 0) {
+    int tz = atoi(command + 3);
+    ui.setTimezoneOffset((int8_t)tz, true);
+    char dtStr[36];
+    ui.formatLocalDateTime(dtStr, sizeof(dtStr), true, true);
+    snprintf(reply, 120, "OK - timezone set to UTC%+d (%s)", (int)ui.getTimezoneOffset(), dtStr);
+    return true;
   }
 
   // ---------------- CHANNELS COMMANDS ----------------
@@ -1086,6 +1114,10 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
       snprintf(reply, 80, "> %s", dtStr);
       return true;
     }
+    if (strcmp(config, "tz") == 0 || strcmp(config, "tz.offset") == 0 || strcmp(config, "timezone") == 0) {
+      snprintf(reply, 40, "> UTC%+d (%d)", (int)ui.getTimezoneOffset(), (int)ui.getTimezoneOffset());
+      return true;
+    }
     if (strcmp(config, "adc.multiplier") == 0) {
       snprintf(reply, 40, "> %.3f", getAdcMultiplier());
       return true;
@@ -1301,6 +1333,13 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
       } else {
         strcpy(reply, "ERR: use YYYY-MM-DD HH:MM:SS");
       }
+      return true;
+    }
+    if (memcmp(config, "tz ", 3) == 0 || memcmp(config, "tz.offset ", 10) == 0 || memcmp(config, "timezone ", 9) == 0) {
+      const char* val = strchr(config, ' ') + 1;
+      int tz = atoi(val);
+      ui.setTimezoneOffset((int8_t)tz, true);
+      snprintf(reply, 80, "OK - Timezone set to UTC%+d", (int)ui.getTimezoneOffset());
       return true;
     }
     if (memcmp(config, "adc.multiplier ", 15) == 0) {

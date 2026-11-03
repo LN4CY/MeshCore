@@ -22,7 +22,7 @@ extern UITask ui_task;
 extern DataStore store;
 
 #define TAP_SETTINGS_FILE  "/tap_settings.bin"
-#define TAP_SETTINGS_MAGIC 0x54415032UL // "TAP2" (defaults to dark_mode = 1)
+#define TAP_SETTINGS_MAGIC 0x54415033UL // "TAP3" (defaults to dark_mode = 1, tz_offset = -5)
 
 #define COLOR_NAVY       0x1994
 #define COLOR_DARK_HDR   0x0863
@@ -147,11 +147,14 @@ TapUI::TapUI()
     _edit_mode(EDIT_NONE),
     _needs_full_redraw(true),
     _needs_chat_messages_redraw(false),
+    _needs_tabbar_redraw(false),
     _last_status_ms(0),
     _backlight_on(true),
     _brightness_pct(100),
     _ble_enabled(true),
     _dark_mode(true), // Dark theme by default for lower power consumption
+    _tz_offset(-5),   // Default local timezone (UTC-5)
+    _tz_configured(false),
     _screen_sleep_seconds(60),
     _last_activity_ms(0),
     _is_screen_sleeping(false),
@@ -176,6 +179,7 @@ TapUI::TapUI()
     _gps_fix_saved_once(false),
     _last_gps_save_ms(0),
     _last_gps_ui_refresh_ms(0),
+    _last_gps_card_hash(0),
     _selected_preset_idx(23), // Default USA (910.525 MHz / SF7 / BW62.5 / CR5)
     _radio_freq(910.525f),
     _radio_sf(7),
@@ -202,6 +206,10 @@ void TapUI::loadDeviceSettings() {
       _ble_enabled = (s.ble_enabled != 0);
       _gps_pins_swapped = (s.gps_pins_swapped != 0);
       _dark_mode = (s.dark_mode != 0);
+      if (s.tz_configured && s.tz_offset >= -12 && s.tz_offset <= 14) {
+        _tz_offset = s.tz_offset;
+        _tz_configured = true;
+      }
       _screen_sleep_seconds = s.screen_sleep_secs;
       if (s.gps_baud >= 4800 && s.gps_baud <= 921600) {
         _gps_baud = s.gps_baud;
@@ -218,6 +226,8 @@ void TapUI::saveDeviceSettings() {
   s.ble_enabled = _ble_enabled ? 1 : 0;
   s.gps_pins_swapped = _gps_pins_swapped ? 1 : 0;
   s.dark_mode = _dark_mode ? 1 : 0;
+  s.tz_offset = _tz_offset;
+  s.tz_configured = _tz_configured ? 1 : 0;
   s.screen_sleep_secs = _screen_sleep_seconds;
   s.gps_baud = _gps_baud;
 
@@ -285,7 +295,7 @@ bool TapUI::begin(DisplayDriver* display) {
   }
 #endif
 
-  // Enable GPS & location sharing with MeshCore companion app and adverts by default
+  // Enable GPS & location sharing with MeshCore companion app and adverts by default, and sync timezone
   NodePrefs* prefs = the_mesh.getNodePrefs();
   if (prefs) {
     bool changed = false;
@@ -294,6 +304,23 @@ bool TapUI::begin(DisplayDriver* display) {
       prefs->advert_loc_policy = ADVERT_LOC_SHARE;
       prefs->telemetry_mode_loc = TELEM_MODE_ALLOW_ALL;
       changed = true;
+    }
+    if (_tz_configured) {
+      if (prefs->tz_offset != _tz_offset) {
+        prefs->tz_offset = _tz_offset;
+        changed = true;
+      }
+    } else if (prefs->tz_offset != 0 && prefs->tz_offset >= -12 && prefs->tz_offset <= 14) {
+      _tz_offset = prefs->tz_offset;
+      _tz_configured = true;
+      saveDeviceSettings();
+    } else {
+      // Default local timezone (UTC-5) and sync to prefs
+      _tz_offset = -5;
+      _tz_configured = true;
+      prefs->tz_offset = _tz_offset;
+      changed = true;
+      saveDeviceSettings();
     }
     if (changed) {
       the_mesh.savePrefs();
@@ -370,16 +397,41 @@ void TapUI::clearBLEBonds() {
   showStatusNotification("BLE Bonds Cleared!");
 }
 
+int8_t TapUI::getTimezoneOffset() const {
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  if (prefs && prefs->tz_offset != 0 && prefs->tz_offset >= -12 && prefs->tz_offset <= 14) {
+    return prefs->tz_offset;
+  }
+  return _tz_offset;
+}
+
+void TapUI::setTimezoneOffset(int8_t tz, bool persist) {
+  if (tz < -12) tz = -12;
+  if (tz > 14) tz = 14;
+  _tz_offset = tz;
+  _tz_configured = true;
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  if (prefs) {
+    prefs->tz_offset = tz;
+  }
+  if (persist) {
+    the_mesh.savePrefs();
+    saveDeviceSettings();
+  }
+  _needs_full_redraw = true;
+}
+
 void TapUI::formatLocalDateTime(char* out, size_t max_len, bool include_date, bool include_tz) const {
   uint32_t utc = the_mesh.getRTCClock()->getCurrentTime();
-  time_t local_t = (time_t)utc;
+  int8_t tz = getTimezoneOffset();
+  time_t local_t = (time_t)((int64_t)utc + (int64_t)tz * 3600LL);
   struct tm tm_info;
   gmtime_r(&local_t, &tm_info);
 
   if (include_date && include_tz) {
-    snprintf(out, max_len, "%04d-%02d-%02d %02d:%02d:%02d UTC",
+    snprintf(out, max_len, "%04d-%02d-%02d %02d:%02d:%02d UTC%+d",
              tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
-             tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec);
+             tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec, (int)tz);
   } else if (include_date) {
     snprintf(out, max_len, "%04d-%02d-%02d %02d:%02d:%02d",
              tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
@@ -407,8 +459,10 @@ bool TapUI::parseAndSetLocalDateTime(const char* str) {
   if (is_leap && mo > 2) days += 1;
   days += (dy - 1);
 
-  uint32_t epoch = days * 86400UL + hr * 3600UL + mn * 60UL + sc;
-  the_mesh.getRTCClock()->setCurrentTime(epoch);
+  int64_t local_epoch = (int64_t)days * 86400LL + (int64_t)hr * 3600LL + (int64_t)mn * 60LL + (int64_t)sc;
+  int64_t utc_epoch = local_epoch - (int64_t)getTimezoneOffset() * 3600LL;
+  if (utc_epoch < 1500000000LL) return false;
+  the_mesh.getRTCClock()->setCurrentTime((uint32_t)utc_epoch);
   _needs_full_redraw = true;
   return true;
 }
@@ -983,7 +1037,7 @@ void TapUI::addReceivedMessage(const char* sender, const char* text, bool isDire
   if (_current_tab == TAB_CHAT) {
     _needs_chat_messages_redraw = true;
   } else {
-    _needs_full_redraw = true;
+    _needs_tabbar_redraw = true;
   }
 }
 
@@ -1015,7 +1069,7 @@ void TapUI::addReceivedChannelMessage(uint8_t channel_idx, const char* channel_n
   if (_current_tab == TAB_CHAT && _active_contact_idx == -1 && _active_channel == channel_idx) {
     _needs_chat_messages_redraw = true;
   } else {
-    _needs_full_redraw = true;
+    _needs_tabbar_redraw = true;
   }
 }
 
@@ -1094,10 +1148,10 @@ void TapUI::update() {
     board.setBacklight(false);
   }
 
-  // Live refresh when viewing the GPS tab so speed, heading, satellites & node distance update in real time
-  if (!_is_screen_sleeping && _current_tab == TAB_GPS && (now - _last_gps_ui_refresh_ms > 2000UL)) {
+  // Flicker-free partial refresh when viewing the GPS tab (only redraws card interior when values change)
+  if (!_is_screen_sleeping && _current_tab == TAB_GPS && !_needs_full_redraw && (now - _last_gps_ui_refresh_ms > 3000UL)) {
     _last_gps_ui_refresh_ms = now;
-    _needs_full_redraw = true;
+    refreshGPSDataOnly();
   }
 
   TouchPoint pt;
@@ -1132,6 +1186,7 @@ void TapUI::update() {
   if (_needs_full_redraw) {
     _needs_full_redraw = false;
     _needs_chat_messages_redraw = false;
+    _needs_tabbar_redraw = false;
 
     _display->setColor(colBg());
     _display->fillRect(0, 44, 320, 196);
@@ -1149,11 +1204,15 @@ void TapUI::update() {
     _last_status_ms = now;
   } else if (_needs_chat_messages_redraw) {
     _needs_chat_messages_redraw = false;
+    _needs_tabbar_redraw = false;
     if (_current_tab == TAB_CHAT) {
       drawChatMessagesOnly();
       drawTabBar();
     }
-  } else if (now - _last_status_ms > 4000) {
+  } else if (_needs_tabbar_redraw) {
+    _needs_tabbar_redraw = false;
+    drawTabBar();
+  } else if (now - _last_status_ms > 10000) {
     drawStatusBar();
     _last_status_ms = now;
   }
@@ -2358,6 +2417,7 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
 // GPS SCREEN (2 Sub-Tabs: [GPS TELEMETRY] | [HEADING & NAV])
 // -------------------------------------------------------------
 void TapUI::drawGPSScreen() {
+  _last_gps_card_hash = 0;
   _display->setColor(colBg());
   _display->fillRect(0, 44, 320, 196);
   _display->setTextSize(1);
@@ -2705,6 +2765,247 @@ void TapUI::drawGPSNavView() {
   _display->fillRect(234, 205, 74, 24);
   _display->setColor(COLOR_WHITE);
   drawStr(246, 213, "DM NODE");
+}
+
+void TapUI::refreshGPSDataOnly() {
+  if (!_display || _current_tab != TAB_GPS) return;
+
+  LocationProvider* loc = sensors.getLocationProvider();
+  bool hasLoc = (loc != nullptr && loc->isEnabled());
+  bool fixValid = (hasLoc && loc->isValid());
+  long sats = hasLoc ? loc->satellitesCount() : 0;
+  long lat_e6 = fixValid ? loc->getLatitude() : (long)(sensors.node_lat * 1e6);
+  long lon_e6 = fixValid ? loc->getLongitude() : (long)(sensors.node_lon * 1e6);
+  long alt_m = fixValid ? (loc->getAltitude() / 1000L) : 0;
+  int spd_tenths = (int)(tap_gps.getSpeedKmh() * 10.0f + 0.5f);
+  int crs_deg = tap_gps.hasCourse() ? ((int)(tap_gps.getCourseDeg() + 0.5f) % 360) : -1;
+  uint32_t rx_kb = fixValid ? 0 : (tap_gps.getUartBytes() / 512UL);
+
+  DiscoveredNodeItem items[48];
+  int count = (_gps_subview == 1) ? buildSortedContactList(items, 48) : 0;
+  int selIdx = 0;
+  int32_t tLat_e6 = 0, tLon_e6 = 0;
+  if (_gps_subview == 1 && count > 0) {
+    for (int i = 0; i < count; i++) {
+      if (items[i].contact_idx == _gps_nav_target_slot) {
+        selIdx = i;
+        break;
+      }
+    }
+    tLat_e6 = items[selIdx].lat;
+    tLon_e6 = items[selIdx].lon;
+  }
+
+  // Compute FNV-1a hash of the displayed values
+  uint32_t h = 2166136261UL;
+  auto mix = [&](uint32_t v) { h = (h ^ v) * 16777619UL; };
+  mix(_gps_subview);
+  mix(hasLoc ? 1 : 0);
+  mix(fixValid ? 1 : 0);
+  mix((uint32_t)sats);
+  mix((uint32_t)(lat_e6 / 10)); // 5 decimal places (~1.1m)
+  mix((uint32_t)(lon_e6 / 10));
+  mix((uint32_t)alt_m);
+  mix((uint32_t)spd_tenths);
+  mix((uint32_t)(crs_deg + 1));
+  if (_gps_subview == 0) {
+    mix((uint32_t)tap_gps.getHDOP());
+    mix(rx_kb);
+  } else {
+    mix(_gps_metric_units ? 1 : 0);
+    mix((uint32_t)count);
+    mix((uint32_t)selIdx);
+    mix((uint32_t)tLat_e6);
+    mix((uint32_t)tLon_e6);
+  }
+
+  if (h == _last_gps_card_hash) {
+    return; // Nothing changed on screen -> zero SPI writes, zero flicker!
+  }
+  _last_gps_card_hash = h;
+
+  if (_gps_subview == 0) {
+    // Only redraw the status badge interior (X=9..202, Y=70..87) and Card interior (X=9..310, Y=93..158)
+    _display->setTextSize(1);
+    _display->setColor(fixValid ? COLOR_GREEN_BTN : (hasLoc ? COLOR_ORANGE_BTN : colCardBg()));
+    _display->fillRect(9, 70, 194, 18);
+    _display->setColor(fixValid ? COLOR_WHITE : (hasLoc ? COLOR_BLACK : colSubText()));
+    char statusBuf[34];
+    if (fixValid) {
+      snprintf(statusBuf, sizeof(statusBuf), "3D FIX LOCKED (%ld SAT)", sats);
+    } else if (hasLoc) {
+      snprintf(statusBuf, sizeof(statusBuf), "SEARCHING SATS (%ld IN VIEW)", sats);
+    } else {
+      strcpy(statusBuf, "GPS RECEIVER OFF");
+    }
+    drawStr(16, 75, statusBuf);
+
+    _display->setColor(colCardBg());
+    _display->fillRect(9, 93, 302, 66);
+
+    char buf[68];
+    if (fixValid) {
+      double lat = (double)loc->getLatitude() / 1e6;
+      double lon = (double)loc->getLongitude() / 1e6;
+
+      _display->setColor(colText());
+      snprintf(buf, sizeof(buf), "Lat: %.6f %c   Lon: %.6f %c",
+               fabs(lat), lat >= 0 ? 'N' : 'S',
+               fabs(lon), lon >= 0 ? 'E' : 'W');
+      drawStr(14, 97, buf);
+
+      snprintf(buf, sizeof(buf), "Alt: %ld m (%ld ft)   HDOP: %.1f",
+               alt_m, (long)(alt_m * 3.28084), (float)tap_gps.getHDOP() / 10.0f);
+      drawStr(14, 111, buf);
+
+      _display->setColor(colTitle());
+      if (tap_gps.hasCourse()) {
+        float crs = tap_gps.getCourseDeg();
+        snprintf(buf, sizeof(buf), "Spd: %.1f km/h (%.1f mph)  Hdg: %03d deg %s",
+                 tap_gps.getSpeedKmh(), tap_gps.getSpeedMph(),
+                 (int)(crs + 0.5f) % 360, degToCardinal(crs));
+      } else {
+        snprintf(buf, sizeof(buf), "Spd: %.1f km/h (%.1f mph)  Hdg: --- (Static)",
+                 tap_gps.getSpeedKmh(), tap_gps.getSpeedMph());
+      }
+      drawStr(14, 125, buf);
+    } else {
+      _display->setColor(colSubText());
+      if (sensors.node_lat != 0.0 || sensors.node_lon != 0.0) {
+        snprintf(buf, sizeof(buf), "Saved Pos: %.5f, %.5f", sensors.node_lat, sensors.node_lon);
+        drawStr(14, 97, buf);
+      } else {
+        drawStr(14, 97, "Coordinates: Waiting for satellite fix...");
+      }
+      drawStr(14, 111, "Altitude:    Waiting for satellite fix...");
+      drawStr(14, 125, "Tap [HEADING & NAV] for Speed & Node Dist");
+    }
+
+    char diag[48];
+    if (loc) loc->formatDiagnostics(diag, sizeof(diag));
+    else strcpy(diag, "en:1 sat:0 fix:0");
+    snprintf(buf, sizeof(buf), "Diag: %.42s", diag);
+    _display->setColor(colMutedText());
+    drawStr(14, 143, buf);
+  } else {
+    // Subview 1: Only redraw the inner dynamic lines of Card 1 (Y=87..124) and Card 2 (Y=156..202)
+    double myLat = 0.0, myLon = 0.0;
+    bool myHasPos = false;
+    if (fixValid) {
+      myLat = (double)loc->getLatitude() / 1e6;
+      myLon = (double)loc->getLongitude() / 1e6;
+      myHasPos = (myLat != 0.0 || myLon != 0.0);
+    } else if (sensors.node_lat != 0.0 || sensors.node_lon != 0.0) {
+      myLat = sensors.node_lat;
+      myLon = sensors.node_lon;
+      myHasPos = true;
+    }
+
+    _display->setColor(colCardBg());
+    _display->fillRect(9, 87, 224, 20);
+    _display->fillRect(9, 108, 302, 16);
+
+    _display->setTextSize(2);
+    char hdgBig[16];
+    if (tap_gps.hasCourse()) {
+      float crs = tap_gps.getCourseDeg();
+      snprintf(hdgBig, sizeof(hdgBig), "%03d %s", (int)(crs + 0.5f) % 360, degToCardinal(crs));
+      _display->setColor(COLOR_GREEN_BTN);
+    } else {
+      strcpy(hdgBig, "--- --");
+      _display->setColor(colSubText());
+    }
+    drawStr(14, 88, hdgBig);
+
+    char spdBig[16];
+    if (_gps_metric_units) {
+      snprintf(spdBig, sizeof(spdBig), "%.1fkm/h", tap_gps.getSpeedKmh());
+    } else {
+      snprintf(spdBig, sizeof(spdBig), "%.1fmph", tap_gps.getSpeedMph());
+    }
+    _display->setColor(COLOR_GOLD_STAR);
+    drawStr(122, 88, spdBig);
+
+    _display->setTextSize(1);
+    _display->setColor(colSubText());
+    char myLine[54];
+    if (myHasPos) {
+      snprintf(myLine, sizeof(myLine), "%.1f kts | Me: %.5f, %.5f (%s)",
+               tap_gps.getSpeedKnots(), myLat, myLon, fixValid ? "3D Fix" : "Saved");
+    } else {
+      snprintf(myLine, sizeof(myLine), "%.1f kts | Waiting for GPS fix...", tap_gps.getSpeedKnots());
+    }
+    drawStr(14, 111, myLine);
+
+    if (count > 0) {
+      DiscoveredNodeItem* target = &items[selIdx];
+      _display->setColor(colCardBg());
+      _display->fillRect(9, 155, 302, 47);
+
+      bool targetHasPos = (target->lat != 0 || target->lon != 0);
+      if (myHasPos && targetHasPos) {
+        double tLat = (double)target->lat / 1e6;
+        double tLon = (double)target->lon / 1e6;
+        double dist_m = calcDistanceMeters(myLat, myLon, tLat, tLon);
+        double brg = calcBearingDegrees(myLat, myLon, tLat, tLon);
+        const char* card = degToCardinal((float)brg);
+
+        char distLine[50];
+        if (_gps_metric_units) {
+          if (dist_m < 1000.0) {
+            snprintf(distLine, sizeof(distLine), "DIST: %ld m (%.0f ft)",
+                     (long)(dist_m + 0.5), dist_m * 3.28084);
+          } else {
+            snprintf(distLine, sizeof(distLine), "DIST: %.2f km (%.2f mi)",
+                     dist_m / 1000.0, dist_m / 1609.344);
+          }
+        } else {
+          double dist_ft = dist_m * 3.28084;
+          if (dist_ft < 5280.0) {
+            snprintf(distLine, sizeof(distLine), "DIST: %ld ft (%ld m)",
+                     (long)(dist_ft + 0.5), (long)(dist_m + 0.5));
+          } else {
+            snprintf(distLine, sizeof(distLine), "DIST: %.2f mi (%.2f km)",
+                     dist_m / 1609.344, dist_m / 1000.0);
+          }
+        }
+        _display->setColor(colText());
+        drawStr(14, 158, distLine);
+
+        char brgLine[52];
+        if (tap_gps.hasCourse()) {
+          float rel = fmod((float)brg - tap_gps.getCourseDeg() + 540.0f, 360.0f) - 180.0f;
+          const char* relWord = (fabs(rel) <= 15.0f) ? "AHEAD" :
+                                (fabs(rel) >= 165.0f) ? "BEHIND" :
+                                (rel > 0.0f ? "RIGHT" : "LEFT");
+          snprintf(brgLine, sizeof(brgLine), "BRG: %03d deg (%s) | Rel: %+d deg %s",
+                   (int)(brg + 0.5) % 360, card, (int)roundf(rel), relWord);
+        } else {
+          snprintf(brgLine, sizeof(brgLine), "HEADING TO NODE: %03d deg (%s)",
+                   (int)(brg + 0.5) % 360, card);
+        }
+        _display->setColor(COLOR_GOLD_STAR);
+        drawStr(14, 173, brgLine);
+
+        char coordLine[50];
+        snprintf(coordLine, sizeof(coordLine), "Node Pos: %.5f, %.5f", tLat, tLon);
+        _display->setColor(colSubText());
+        drawStr(14, 188, coordLine);
+      } else {
+        _display->setColor(colSubText());
+        if (!targetHasPos) {
+          drawStr(14, 162, "Selected node has no GPS coords yet.");
+          drawStr(14, 178, "Tap [REQ NODE LOC] to query its GPS.");
+        } else {
+          drawStr(14, 162, "Waiting for our local GPS fix...");
+          char coordLine[50];
+          snprintf(coordLine, sizeof(coordLine), "Node Pos: %.5f, %.5f",
+                   (double)target->lat / 1e6, (double)target->lon / 1e6);
+          drawStr(14, 178, coordLine);
+        }
+      }
+    }
+  }
 }
 
 void TapUI::handleGPSTouch(uint16_t tx, uint16_t ty) {
@@ -3149,12 +3450,12 @@ void TapUI::drawRadioDeviceView() {
   _display->setColor(_dark_mode ? COLOR_WHITE : COLOR_BLACK);
   drawStr(240, 120, _dark_mode ? "THEME:DARK" : "THEME:LITE");
 
-  // Row 4: Clock Display & Nudge: Y in 137..157
+  // Row 4: Local Timezone & Clock Display: Y in 137..157
   char dtBuf[32];
   formatLocalDateTime(dtBuf, sizeof(dtBuf), true, false);
   _display->setColor(colTitle());
-  char clkLine[38];
-  snprintf(clkLine, sizeof(clkLine), "UTC: %s", dtBuf);
+  char clkLine[42];
+  snprintf(clkLine, sizeof(clkLine), "UTC%+d: %s", (int)getTimezoneOffset(), dtBuf);
   drawStr(10, 143, clkLine);
 
   _display->setColor(colCardBg());
@@ -3434,13 +3735,21 @@ void TapUI::handleRadioDeviceTouch(uint16_t tx, uint16_t ty) {
 
   if (ty >= 137 && ty <= 157) {
     if (tx >= 236 && tx <= 272) {
-      adjustClockSeconds(-3600);
-      showStatusNotification("Clock -1 Hour");
+      int8_t newTz = getTimezoneOffset() - 1;
+      if (newTz < -12) newTz = 14;
+      setTimezoneOffset(newTz, true);
+      char msg[32];
+      snprintf(msg, sizeof(msg), "Timezone set to UTC%+d", (int)getTimezoneOffset());
+      showStatusNotification(msg);
       return;
     }
     if (tx >= 276 && tx <= 312) {
-      adjustClockSeconds(3600);
-      showStatusNotification("Clock +1 Hour");
+      int8_t newTz = getTimezoneOffset() + 1;
+      if (newTz > 14) newTz = -12;
+      setTimezoneOffset(newTz, true);
+      char msg[32];
+      snprintf(msg, sizeof(msg), "Timezone set to UTC%+d", (int)getTimezoneOffset());
+      showStatusNotification(msg);
       return;
     }
   }

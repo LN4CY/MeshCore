@@ -72,6 +72,7 @@ public:
   bool hasCourse() const { return _has_course; }
   float getCourseDeg() const { return _has_course ? (_course_deg_milli * 0.001f) : 0.0f; }
   uint8_t getHDOP() const { return _nmea.getHDOP(); }
+  uint32_t getUartBytes() const { return _uart_bytes; }
 };
 
 class TapSensorManager : public EnvironmentSensorManager {
