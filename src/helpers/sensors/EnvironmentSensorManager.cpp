@@ -796,6 +796,16 @@ void EnvironmentSensorManager::initBasicGPS() {
 // or make a new location provider ...
 #ifdef RAK_WISBLOCK_GPS
 void EnvironmentSensorManager::rakGPSInit(){
+#if defined(RAK_WISMESH_TAP)
+  Serial1.setPins(PIN_SERIAL1_RX, PIN_SERIAL1_TX);
+  Serial1.begin(9600);
+  gps_active = true;
+  gps_detected = true;
+  if (_location) {
+    _location->begin();
+  }
+  return;
+#endif
 
   Serial1.setPins(PIN_GPS_TX, PIN_GPS_RX);
 

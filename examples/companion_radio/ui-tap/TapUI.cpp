@@ -20,6 +20,16 @@
 #define COLOR_ACTIVE_TAB 0xFFFF
 #define COLOR_INACT_TAB  0xC618
 
+// Node Card Colors by Contact Type
+#define COLOR_CARD_CLIENT_BG   0xFFFF
+#define COLOR_CARD_CLIENT_BD   0x2A69
+#define COLOR_CARD_REPEAT_BG   0xFFFA
+#define COLOR_CARD_REPEAT_BD   0xFC00
+#define COLOR_CARD_ROOM_BG     0xF7BF
+#define COLOR_CARD_ROOM_BD     0x791B
+#define COLOR_CARD_SENSOR_BG   0xEFFE
+#define COLOR_CARD_SENSOR_BD   0x04F7
+
 static const char* QUICK_RESPONSES[] = {
   "OK",
   "YES",
@@ -31,15 +41,25 @@ static const char* QUICK_RESPONSES[] = {
 static const uint8_t NUM_QUICK_RESPONSES = 6;
 static uint8_t s_quick_idx = 0;
 
-static const float REGION_FREQS[] = {
-  910.525f, // US Default
-  906.875f, // US Mesh
-  869.525f, // EU LongFast
-  869.618f, // EU WisMesh
-  915.000f, // AU915
-  433.175f  // EU433
+static const RFPreset RF_PRESETS[] = {
+  { "US915 LongFast",  906.875f, 11, 250.0f, 5 },
+  { "US915 MedFast",   906.875f,  9, 250.0f, 5 },
+  { "US915 ShortFast", 906.875f,  7, 250.0f, 5 },
+  { "US915 WisMesh",   910.525f, 10, 125.0f, 5 },
+  { "EU868 LongFast",  869.525f, 11, 250.0f, 5 },
+  { "EU868 WisMesh",   869.618f, 10, 125.0f, 5 },
+  { "AU915 LongFast",  915.000f, 11, 250.0f, 5 },
+  { "EU433 LongFast",  433.175f, 11, 250.0f, 5 },
+  { "Custom",            0.000f,  0,   0.0f, 0 }
 };
-static const uint8_t NUM_REGION_FREQS = 6;
+static const int NUM_RF_PRESETS = 9;
+
+static const uint32_t GPS_BAUD_OPTIONS[] = { 9600, 19200, 38400, 57600, 115200 };
+static const int NUM_GPS_BAUDS = 5;
+
+static const uint32_t SLEEP_TIMEOUTS[] = { 30, 60, 120, 300, 0 }; // 0 = never
+static const char* SLEEP_LABELS[] = { "30s", "1m", "2m", "5m", "Never" };
+static const int NUM_SLEEP_OPTIONS = 5;
 
 TapUI::TapUI()
   : _display(nullptr),
@@ -47,8 +67,14 @@ TapUI::TapUI()
     _current_tab(TAB_CHAT),
     _kb_mode(KB_LOWER),
     _needs_full_redraw(true),
+    _needs_chat_messages_redraw(false),
     _last_status_ms(0),
     _backlight_on(true),
+    _screen_sleep_seconds(60), // 1 min default
+    _last_activity_ms(0),
+    _is_screen_sleeping(false),
+    _touch_down_ms(0),
+    _touch_is_down(false),
     _active_channel(0),
     _active_contact_idx(-1),
     _show_rooms_subview(false),
@@ -56,16 +82,19 @@ TapUI::TapUI()
     _msg_count(0),
     _text_len(0),
     _nodes_page(0),
+    _gps_baud(9600),
+    _gps_pins_swapped(false),
+    _selected_preset_idx(3), // Default US915 WisMesh
     _radio_freq(910.525f),
     _radio_sf(10),
     _radio_bw(125.0f),
     _radio_cr(5),
     _radio_tx_power(22),
-    _radio_rx_boost(true),
     _radio_status_expiry(0)
 {
   _text_buffer[0] = 0;
   _radio_status_msg[0] = 0;
+  memset(_messages, 0, sizeof(_messages));
 }
 
 bool TapUI::begin(DisplayDriver* display) {
@@ -75,6 +104,8 @@ bool TapUI::begin(DisplayDriver* display) {
   pinMode(PIN_TFT_BL, OUTPUT);
   digitalWrite(PIN_TFT_BL, HIGH);
   _backlight_on = true;
+  _last_activity_ms = millis();
+  _is_screen_sleeping = false;
 
   _touch.begin();
   _touch.setRotation(3);
@@ -87,14 +118,51 @@ bool TapUI::begin(DisplayDriver* display) {
     if (prefs->bw > 10.0f) _radio_bw = prefs->bw;
     if (prefs->cr >= 5 && prefs->cr <= 8) _radio_cr = prefs->cr;
     if (prefs->tx_power_dbm != 0) _radio_tx_power = prefs->tx_power_dbm;
-    _radio_rx_boost = (prefs->rx_boosted_gain != 0);
+
+    // Detect if current params match an RF preset
+    _selected_preset_idx = 8; // Default Custom
+    for (int p = 0; p < NUM_RF_PRESETS - 1; p++) {
+      if (fabs(_radio_freq - RF_PRESETS[p].freq) < 0.05f &&
+          _radio_sf == RF_PRESETS[p].sf &&
+          fabs(_radio_bw - RF_PRESETS[p].bw) < 5.0f &&
+          _radio_cr == RF_PRESETS[p].cr) {
+        _selected_preset_idx = p;
+        break;
+      }
+    }
   }
+
+  restartGPS();
 
   _needs_full_redraw = true;
   return true;
 }
 
+void TapUI::restartGPS() {
+  Serial1.end();
+  if (!_gps_pins_swapped) {
+    Serial1.setPins(PIN_SERIAL1_RX, PIN_SERIAL1_TX);
+  } else {
+    Serial1.setPins(PIN_SERIAL1_TX, PIN_SERIAL1_RX);
+  }
+  Serial1.begin(_gps_baud);
+
+  LocationProvider* loc = sensors.getLocationProvider();
+  if (loc) {
+    loc->begin();
+  }
+}
+
+void TapUI::wakeScreen() {
+  _is_screen_sleeping = false;
+  digitalWrite(PIN_TFT_BL, HIGH);
+  _backlight_on = true;
+  _last_activity_ms = millis();
+  _needs_full_redraw = true;
+}
+
 void TapUI::cycleTab() {
+  wakeScreen();
   int next = (int)_current_tab + 1;
   if (next > TAB_RADIO) next = TAB_CHAT;
   _current_tab = (TapTab)next;
@@ -103,8 +171,28 @@ void TapUI::cycleTab() {
 }
 
 void TapUI::toggleBacklight() {
+  wakeScreen();
   _backlight_on = !_backlight_on;
   digitalWrite(PIN_TFT_BL, _backlight_on ? HIGH : LOW);
+}
+
+void TapUI::handlePhysicalButtonPress() {
+  wakeScreen();
+  cycleTab();
+}
+
+void TapUI::powerOff() {
+  if (_display) {
+    _display->setColor(COLOR_NAVY);
+    _display->fillRect(0, 0, 320, 240);
+    _display->setColor(COLOR_WHITE);
+    _display->setTextSize(1);
+    drawStr(90, 110, "Shutting down WisMesh Tap...");
+    drawStr(80, 130, "Entering Ultra-Low Power Sleep");
+  }
+  delay(500);
+  digitalWrite(PIN_TFT_BL, LOW);
+  board.powerOff();
 }
 
 void TapUI::appendChar(char c) {
@@ -123,7 +211,18 @@ void TapUI::deleteChar() {
   }
 }
 
-void TapUI::addReceivedMessage(const char* sender, const char* text, bool isDirect) {
+void TapUI::applyRFPreset(int preset_idx) {
+  if (preset_idx < 0 || preset_idx >= NUM_RF_PRESETS - 1) return;
+  _selected_preset_idx = preset_idx;
+  _radio_freq = RF_PRESETS[preset_idx].freq;
+  _radio_sf   = RF_PRESETS[preset_idx].sf;
+  _radio_bw   = RF_PRESETS[preset_idx].bw;
+  _radio_cr   = RF_PRESETS[preset_idx].cr;
+  _needs_full_redraw = true;
+}
+
+void TapUI::addReceivedMessage(const char* sender, const char* text, bool isDirect, const uint8_t* pubkey) {
+  _last_activity_ms = millis();
   if (_msg_count >= MAX_UI_MESSAGES) {
     for (int i = 0; i < MAX_UI_MESSAGES - 1; i++) {
       _messages[i] = _messages[i + 1];
@@ -137,13 +236,44 @@ void TapUI::addReceivedMessage(const char* sender, const char* text, bool isDire
   m->text[sizeof(m->text) - 1] = 0;
   m->is_outgoing = false;
   m->is_direct = isDirect;
+  m->channel_idx = 0;
+  if (pubkey) memcpy(m->contact_pubkey, pubkey, 4);
+  else memset(m->contact_pubkey, 0, 4);
+  strncpy(m->target_name, sender ? sender : "", sizeof(m->target_name) - 1);
+  m->target_name[sizeof(m->target_name) - 1] = 0;
 
   if (_current_tab == TAB_CHAT) {
-    _needs_full_redraw = true;
+    _needs_chat_messages_redraw = true;
+  }
+}
+
+void TapUI::addReceivedChannelMessage(uint8_t channel_idx, const char* channel_name, const char* sender, const char* text) {
+  _last_activity_ms = millis();
+  if (_msg_count >= MAX_UI_MESSAGES) {
+    for (int i = 0; i < MAX_UI_MESSAGES - 1; i++) {
+      _messages[i] = _messages[i + 1];
+    }
+    _msg_count = MAX_UI_MESSAGES - 1;
+  }
+  UIMessage* m = &_messages[_msg_count++];
+  strncpy(m->sender, sender ? sender : "Mesh", sizeof(m->sender) - 1);
+  m->sender[sizeof(m->sender) - 1] = 0;
+  strncpy(m->text, text ? text : "", sizeof(m->text) - 1);
+  m->text[sizeof(m->text) - 1] = 0;
+  m->is_outgoing = false;
+  m->is_direct = false;
+  m->channel_idx = channel_idx;
+  memset(m->contact_pubkey, 0, 4);
+  strncpy(m->target_name, channel_name ? channel_name : "Public", sizeof(m->target_name) - 1);
+  m->target_name[sizeof(m->target_name) - 1] = 0;
+
+  if (_current_tab == TAB_CHAT && _active_contact_idx == -1 && _active_channel == channel_idx) {
+    _needs_chat_messages_redraw = true;
   }
 }
 
 void TapUI::addSentMessage(const char* text) {
+  _last_activity_ms = millis();
   if (_msg_count >= MAX_UI_MESSAGES) {
     for (int i = 0; i < MAX_UI_MESSAGES - 1; i++) {
       _messages[i] = _messages[i + 1];
@@ -155,10 +285,29 @@ void TapUI::addSentMessage(const char* text) {
   strncpy(m->text, text ? text : "", sizeof(m->text) - 1);
   m->text[sizeof(m->text) - 1] = 0;
   m->is_outgoing = true;
-  m->is_direct = (_active_contact_idx >= 0);
+
+  if (_active_contact_idx >= 0) {
+    m->is_direct = true;
+    m->channel_idx = 0;
+    ContactInfo c;
+    if (the_mesh.getContactByIdx(_active_contact_idx, c)) {
+      memcpy(m->contact_pubkey, c.id.pub_key, 4);
+      strncpy(m->target_name, c.name, sizeof(m->target_name) - 1);
+      m->target_name[sizeof(m->target_name) - 1] = 0;
+    }
+  } else {
+    m->is_direct = false;
+    m->channel_idx = _active_channel;
+    memset(m->contact_pubkey, 0, 4);
+    ChannelDetails ch;
+    if (the_mesh.getChannel(_active_channel, ch)) {
+      strncpy(m->target_name, ch.name[0] ? ch.name : "Public", sizeof(m->target_name) - 1);
+      m->target_name[sizeof(m->target_name) - 1] = 0;
+    }
+  }
 
   if (_current_tab == TAB_CHAT) {
-    _needs_full_redraw = true;
+    _needs_chat_messages_redraw = true;
   }
 }
 
@@ -184,33 +333,71 @@ void TapUI::sendMessage(const char* text) {
 void TapUI::update() {
   if (!_display) return;
 
-  TouchPoint pt;
-  if (_touch.poll(pt) && pt.justPressed) {
-    uint16_t tx = pt.x;
-    uint16_t ty = pt.y;
-    Serial.printf("[TOUCH] Tap at X=%d, Y=%d\n", tx, ty);
+  unsigned long now = millis();
 
-    // Check tab bar touch: Y in 20..42
-    if (ty >= 20 && ty <= 42) {
-      handleTabTouch(tx, ty);
+  // Screen sleep inactivity timer
+  if (_screen_sleep_seconds > 0 && !_is_screen_sleeping && (now - _last_activity_ms > _screen_sleep_seconds * 1000UL)) {
+    _is_screen_sleeping = true;
+    digitalWrite(PIN_TFT_BL, LOW);
+  }
+
+  TouchPoint pt;
+  if (_touch.poll(pt)) {
+    if (pt.isPressed) {
+      if (!_touch_is_down) {
+        _touch_is_down = true;
+        _touch_down_ms = now;
+      }
     } else {
-      switch (_current_tab) {
-        case TAB_CHAT:  handleChatTouch(tx, ty); break;
-        case TAB_NODES: handleNodesTouch(tx, ty); break;
-        case TAB_CHANS: handleChansTouch(tx, ty); break;
-        case TAB_GPS:   handleGPSTouch(tx, ty); break;
-        case TAB_RADIO: handleRadioTouch(tx, ty); break;
+      _touch_is_down = false;
+    }
+
+    if (pt.justPressed) {
+      _last_activity_ms = now;
+
+      // If screen was sleeping, wake it up and consume the first tap
+      if (_is_screen_sleeping) {
+        wakeScreen();
+        return;
+      }
+
+      uint16_t tx = pt.x;
+      uint16_t ty = pt.y;
+
+      // Check tab bar touch: Y in 20..42
+      if (ty >= 20 && ty <= 42) {
+        handleTabTouch(tx, ty);
+      } else {
+        switch (_current_tab) {
+          case TAB_CHAT:  handleChatTouch(tx, ty); break;
+          case TAB_NODES: handleNodesTouch(tx, ty); break;
+          case TAB_CHANS: handleChansTouch(tx, ty); break;
+          case TAB_GPS:   handleGPSTouch(tx, ty); break;
+          case TAB_RADIO: handleRadioTouch(tx, ty); break;
+        }
       }
     }
   }
 
-  unsigned long now = millis();
+  // Check 3-second long touch in Status Bar (Y < 20) for Power Off
+  if (_touch_is_down && (now - _touch_down_ms >= 3000)) {
+    _touch_is_down = false;
+    powerOff();
+    return;
+  }
+
+  // Smooth selective redraws
   if (_needs_full_redraw) {
     _needs_full_redraw = false;
+    _needs_chat_messages_redraw = false;
+
+    // Redraw screen content area cleanly
     _display->setColor(COLOR_WHITE);
-    _display->fillRect(0, 0, 320, 240);
+    _display->fillRect(0, 44, 320, 196);
+
     drawStatusBar();
     drawTabBar();
+
     switch (_current_tab) {
       case TAB_CHAT:  drawChatScreen(); break;
       case TAB_NODES: drawNodesScreen(); break;
@@ -219,6 +406,11 @@ void TapUI::update() {
       case TAB_RADIO: drawRadioScreen(); break;
     }
     _last_status_ms = now;
+  } else if (_needs_chat_messages_redraw) {
+    _needs_chat_messages_redraw = false;
+    if (_current_tab == TAB_CHAT) {
+      drawChatMessagesOnly();
+    }
   } else if (now - _last_status_ms > 4000) {
     drawStatusBar();
     _last_status_ms = now;
@@ -317,10 +509,16 @@ void TapUI::handleTabTouch(uint16_t tx, uint16_t ty) {
 }
 
 // -------------------------------------------------------------
-// CHAT SCREEN (Full Keyboard + 1-Line Input + Message History)
+// CHAT SCREEN (Shows ONLY Selected Contact / Channel)
 // -------------------------------------------------------------
 void TapUI::drawChatScreen() {
-  // Clear chat area: Y in 44..116
+  drawChatMessagesOnly();
+  drawTextInputBar();
+  drawKeyboard();
+}
+
+void TapUI::drawChatMessagesOnly() {
+  // Clear strictly chat history area: Y in 44..116
   _display->setColor(COLOR_WHITE);
   _display->fillRect(0, 44, 320, 73);
 
@@ -331,40 +529,78 @@ void TapUI::drawChatScreen() {
     _display->setColor(COLOR_DARK_GRAY);
     drawStr(10, 65, "Type new node name below on keyboard.");
     drawStr(10, 80, "Tap green SEND button to save to radio.");
-  } else {
-    // Show up to 4 recent messages
-    int startIdx = 0;
-    if (_msg_count > 4) startIdx = _msg_count - 4;
-    int y = 46;
-    if (_msg_count == 0) {
-      _display->setColor(COLOR_MED_GRAY);
-      _display->setTextSize(1);
-      drawStr(40, 65, "WisMesh Tap Ready - Type message below");
-      drawStr(55, 82, "Tap QUICK or keys to transmit on LoRa");
-    } else {
-      for (int i = startIdx; i < _msg_count; i++) {
-        UIMessage* m = &_messages[i];
-        if (m->is_outgoing) {
-          _display->setColor(COLOR_NAVY);
-          char line[70];
-          snprintf(line, sizeof(line), "You: %s", m->text);
-          drawStr(8, y, line);
-        } else {
-          _display->setColor(COLOR_DARK_GRAY);
-          char line[70];
-          snprintf(line, sizeof(line), "%s: %s", m->sender, m->text);
-          drawStr(8, y, line);
+    return;
+  }
+
+  // Filter messages for currently selected target
+  ContactInfo active_c;
+  bool hasActiveContact = false;
+  if (_active_contact_idx >= 0) {
+    hasActiveContact = the_mesh.getContactByIdx(_active_contact_idx, active_c);
+  }
+
+  // Gather matching messages
+  int matchIndices[MAX_UI_MESSAGES];
+  int matchCount = 0;
+
+  for (int i = 0; i < _msg_count; i++) {
+    UIMessage* m = &_messages[i];
+    if (_active_contact_idx >= 0 && hasActiveContact) {
+      // Must match direct message with this contact
+      if (m->is_direct) {
+        if (memcmp(m->contact_pubkey, active_c.id.pub_key, 4) == 0 ||
+            strcmp(m->sender, active_c.name) == 0 ||
+            strcmp(m->target_name, active_c.name) == 0) {
+          matchIndices[matchCount++] = i;
         }
-        y += 16;
+      }
+    } else {
+      // Must match active channel
+      if (!m->is_direct && m->channel_idx == _active_channel) {
+        matchIndices[matchCount++] = i;
       }
     }
   }
 
-  // Draw 1-Line Input Bar
-  drawTextInputBar();
+  if (matchCount == 0) {
+    _display->setColor(COLOR_MED_GRAY);
+    _display->setTextSize(1);
+    if (_active_contact_idx >= 0 && hasActiveContact) {
+      char targetPrompt[64];
+      snprintf(targetPrompt, sizeof(targetPrompt), "Direct Chat with @%s", active_c.name[0] ? active_c.name : "Node");
+      drawStr(30, 65, targetPrompt);
+      drawStr(45, 82, "Type message below to send private text");
+    } else {
+      ChannelDetails ch;
+      the_mesh.getChannel(_active_channel, ch);
+      char chPrompt[64];
+      snprintf(chPrompt, sizeof(chPrompt), "Channel #%s Broadcast", ch.name[0] ? ch.name : "Public");
+      drawStr(40, 65, chPrompt);
+      drawStr(45, 82, "Type message below to transmit on LoRa");
+    }
+    return;
+  }
 
-  // Draw Full QWERTY Keyboard
-  drawKeyboard();
+  // Display up to 4 recent matching messages
+  int startIdx = 0;
+  if (matchCount > 4) startIdx = matchCount - 4;
+  int y = 46;
+
+  for (int k = startIdx; k < matchCount; k++) {
+    UIMessage* m = &_messages[matchIndices[k]];
+    if (m->is_outgoing) {
+      _display->setColor(COLOR_NAVY);
+      char line[70];
+      snprintf(line, sizeof(line), "You: %s", m->text);
+      drawStr(8, y, line);
+    } else {
+      _display->setColor(COLOR_DARK_GRAY);
+      char line[70];
+      snprintf(line, sizeof(line), "%s: %s", m->sender, m->text);
+      drawStr(8, y, line);
+    }
+    y += 16;
+  }
 }
 
 void TapUI::drawTextInputBar() {
@@ -435,7 +671,6 @@ void TapUI::drawKeyboard() {
   }
 
   // Row 2: Shift, 7 keys, DEL
-  // Shift / Mode button: X in 1..36
   _display->setColor((_kb_mode == KB_UPPER) ? COLOR_NAVY : COLOR_LIGHT_GRAY);
   _display->fillRect(1, 192, 36, 23);
   _display->setColor(COLOR_MED_GRAY);
@@ -469,7 +704,6 @@ void TapUI::drawKeyboard() {
   drawStr(280, 199, "DEL");
 
   // Row 3: ?123, QUICK, SPACE, SEND
-  // ?123 toggle: X in 1..44
   _display->setColor((_kb_mode == KB_SYMBOLS) ? COLOR_NAVY : COLOR_LIGHT_GRAY);
   _display->fillRect(1, 217, 44, 22);
   _display->setColor(COLOR_MED_GRAY);
@@ -477,7 +711,6 @@ void TapUI::drawKeyboard() {
   _display->setColor((_kb_mode == KB_SYMBOLS) ? COLOR_WHITE : COLOR_BLACK);
   drawStr(6, 224, (_kb_mode == KB_SYMBOLS) ? "ABC" : "?123");
 
-  // QUICK canned button: X in 47..96
   _display->setColor(COLOR_PURPLE_BTN);
   _display->fillRect(47, 217, 50, 22);
   _display->setColor(COLOR_DARK_GRAY);
@@ -485,7 +718,6 @@ void TapUI::drawKeyboard() {
   _display->setColor(COLOR_WHITE);
   drawStr(54, 224, "QUICK");
 
-  // SPACE bar: X in 99..239
   _display->setColor(COLOR_WHITE);
   _display->fillRect(99, 217, 140, 22);
   _display->setColor(COLOR_MED_GRAY);
@@ -493,7 +725,6 @@ void TapUI::drawKeyboard() {
   _display->setColor(COLOR_DARK_GRAY);
   drawStr(150, 224, "SPACE");
 
-  // SEND button: X in 242..319
   _display->setColor(COLOR_GREEN_BTN);
   _display->fillRect(242, 217, 77, 22);
   _display->setColor(COLOR_DARK_GRAY);
@@ -503,7 +734,6 @@ void TapUI::drawKeyboard() {
 }
 
 void TapUI::handleChatTouch(uint16_t tx, uint16_t ty) {
-  // Keyboard touches: Y in 140..239
   if (ty >= 140) {
     handleKeyboardTouch(tx, ty);
   }
@@ -549,14 +779,12 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
 
   // Row 2: Y in 192..215
   if (ty >= 192 && ty <= 215) {
-    // Shift toggle: X in 1..36
     if (tx >= 1 && tx <= 36) {
       if (_kb_mode == KB_LOWER) _kb_mode = KB_UPPER;
       else if (_kb_mode == KB_UPPER) _kb_mode = KB_LOWER;
       drawKeyboard();
       return;
     }
-    // 7 keys: X in 39..262
     for (int k = 0; k < 7; k++) {
       int kx = 39 + k * 32;
       if (tx >= kx && tx <= kx + 30) {
@@ -564,7 +792,6 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
         return;
       }
     }
-    // DEL key: X in 264..319
     if (tx >= 264 && tx <= 319) {
       deleteChar();
       return;
@@ -573,14 +800,12 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
 
   // Row 3: Y in 217..239
   if (ty >= 217 && ty <= 239) {
-    // Mode toggle (?123 / ABC): X in 1..44
     if (tx >= 1 && tx <= 44) {
       if (_kb_mode == KB_SYMBOLS) _kb_mode = KB_LOWER;
       else _kb_mode = KB_SYMBOLS;
       drawKeyboard();
       return;
     }
-    // QUICK canned cycle: X in 47..96
     if (tx >= 47 && tx <= 96) {
       const char* phrase = QUICK_RESPONSES[s_quick_idx % NUM_QUICK_RESPONSES];
       s_quick_idx++;
@@ -590,12 +815,10 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
       drawTextInputBar();
       return;
     }
-    // SPACE bar: X in 99..239
     if (tx >= 99 && tx <= 239) {
       appendChar(' ');
       return;
     }
-    // SEND button: X in 242..319
     if (tx >= 242 && tx <= 319) {
       if (_text_len > 0) {
         if (_editing_node_name) {
@@ -614,7 +837,8 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
           sendMessage(_text_buffer);
           _text_len = 0;
           _text_buffer[0] = 0;
-          drawChatScreen();
+          drawTextInputBar();
+          drawChatMessagesOnly();
         }
       }
       return;
@@ -623,10 +847,10 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
 }
 
 // -------------------------------------------------------------
-// NODES SCREEN (Mesh Node Discovery & Direct Messaging)
+// NODES SCREEN (Card Colored by Contact Box Type - No Text Overlap)
 // -------------------------------------------------------------
 struct DiscoveredNodeItem {
-  char name[24];
+  char name[28];
   char id_hex[10];
   uint8_t type;
   int32_t lat, lon;
@@ -641,15 +865,14 @@ void TapUI::drawNodesScreen() {
   DiscoveredNodeItem items[32];
   int count = 0;
 
-  // BaseChatMesh contacts start at MAX_ANON_CONTACTS (8)
   for (int i = 8; i < total_slots && count < 32; i++) {
     ContactInfo c;
     if (!the_mesh.getContactByIdx(i, c)) continue;
     if (c.type == 0) continue; // ADV_TYPE_NONE
 
     if (c.name[0] != 0) {
-      strncpy(items[count].name, c.name, 23);
-      items[count].name[23] = 0;
+      strncpy(items[count].name, c.name, 27);
+      items[count].name[27] = 0;
     } else {
       snprintf(items[count].name, sizeof(items[count].name), "!%02X%02X%02X%02X",
                c.id.pub_key[0], c.id.pub_key[1], c.id.pub_key[2], c.id.pub_key[3]);
@@ -666,10 +889,10 @@ void TapUI::drawNodesScreen() {
   _display->setColor(COLOR_NAVY);
   _display->setTextSize(1);
   char titleBuf[32];
-  snprintf(titleBuf, sizeof(titleBuf), "Discovered Mesh Nodes (%d)", count);
+  snprintf(titleBuf, sizeof(titleBuf), "Discovered Nodes (%d)", count);
   drawStr(10, 50, titleBuf);
 
-  // Discovery beacon button: X in 210..310, Y in 47..65
+  // Discover button at top right
   _display->setColor(COLOR_BLUE_KEY);
   _display->fillRect(210, 47, 100, 19);
   _display->setColor(COLOR_WHITE);
@@ -681,7 +904,6 @@ void TapUI::drawNodesScreen() {
     drawStr(20, 105, "Make sure other nodes are powered and in range.");
     drawStr(20, 125, "Tap [DISCOVER] above to broadcast a discovery probe.");
 
-    // Big discover button
     _display->setColor(COLOR_GREEN_BTN);
     _display->fillRect(40, 155, 240, 36);
     _display->setColor(COLOR_DARK_GRAY);
@@ -703,38 +925,46 @@ void TapUI::drawNodesScreen() {
   for (int i = start; i < end; i++) {
     DiscoveredNodeItem* item = &items[i];
 
-    // Card background
-    _display->setColor(COLOR_LIGHT_GRAY);
+    // Pick box background and border color by contact type
+    uint16_t boxBg = COLOR_CARD_CLIENT_BG;
+    uint16_t boxBd = COLOR_CARD_CLIENT_BD;
+
+    if (item->type == 2) { // Repeater
+      boxBg = COLOR_CARD_REPEAT_BG;
+      boxBd = COLOR_CARD_REPEAT_BD;
+    } else if (item->type == 3) { // Room Server
+      boxBg = COLOR_CARD_ROOM_BG;
+      boxBd = COLOR_CARD_ROOM_BD;
+    } else if (item->type == 4) { // Sensor
+      boxBg = COLOR_CARD_SENSOR_BG;
+      boxBd = COLOR_CARD_SENSOR_BD;
+    }
+
+    // Card background & colored border
+    _display->setColor(boxBg);
     _display->fillRect(8, y, 304, 46);
-    _display->setColor(COLOR_MED_GRAY);
+    _display->setColor(boxBd);
     _display->drawRect(8, y, 304, 46);
 
-    // Node name
+    // Left role accent bar (5px thick)
+    _display->fillRect(8, y, 6, 46);
+
+    // Node name - full width, no overlapping badge
     _display->setColor(COLOR_NAVY);
     _display->setTextSize(1);
-    drawStr(16, y + 6, item->name);
-
-    // Type badge
-    const char* badge = "[CLIENT]";
-    uint16_t badgeColor = COLOR_BLUE_KEY;
-    if (item->type == 2) { badge = "[REPEATER]"; badgeColor = COLOR_ORANGE_BTN; }
-    else if (item->type == 3) { badge = "[ROOM]"; badgeColor = COLOR_PURPLE_BTN; }
-    else if (item->type == 4) { badge = "[SENSOR]"; badgeColor = COLOR_CYAN_BTN; }
-
-    _display->setColor(badgeColor);
-    drawStr(120, y + 6, badge);
+    drawStr(18, y + 6, item->name);
 
     // Node ID / Loc
     _display->setColor(COLOR_DARK_GRAY);
-    char sub[40];
+    char sub[45];
     if (item->lat != 0) {
       snprintf(sub, sizeof(sub), "ID: !%s | Loc: %.2f, %.2f", item->id_hex, (float)item->lat / 1e6f, (float)item->lon / 1e6f);
     } else {
-      snprintf(sub, sizeof(sub), "ID: !%s | Mesh Node", item->id_hex);
+      snprintf(sub, sizeof(sub), "ID: !%s", item->id_hex);
     }
-    drawStr(16, y + 26, sub);
+    drawStr(18, y + 26, sub);
 
-    // DM Button: X in 250..304, Y in y+6..y+40
+    // DM Button: X in 250..304, Y in y+8..y+38
     _display->setColor(COLOR_GREEN_BTN);
     _display->fillRect(250, y + 8, 54, 30);
     _display->setColor(COLOR_DARK_GRAY);
@@ -767,11 +997,10 @@ void TapUI::drawNodesScreen() {
 }
 
 void TapUI::handleNodesTouch(uint16_t tx, uint16_t ty) {
-  // Discover button at top right: X in 210..310, Y in 47..65
   if (tx >= 210 && tx <= 310 && ty >= 47 && ty <= 65) {
     uint8_t cmd_bytes[6];
-    cmd_bytes[0] = 0x01 | 1; // CTL_TYPE_NODE_DISCOVER_REQ
-    cmd_bytes[1] = 0xFF;     // Repeaters
+    cmd_bytes[0] = 0x01 | 1;
+    cmd_bytes[1] = 0xFF;
     uint32_t tag = 0;
     the_mesh.getRNG()->random((uint8_t*)&tag, 4);
     memcpy(&cmd_bytes[2], &tag, 4);
@@ -783,7 +1012,6 @@ void TapUI::handleNodesTouch(uint16_t tx, uint16_t ty) {
     return;
   }
 
-  // Prev / Next paging: Y in 218..238
   if (ty >= 218 && ty <= 238) {
     if (tx >= 8 && tx <= 68 && _nodes_page > 0) {
       _nodes_page--;
@@ -797,7 +1025,6 @@ void TapUI::handleNodesTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Row DM button touches: Y in 70..215
   int total_slots = the_mesh.getTotalContactSlots();
   int itemsPerPage = 3;
   int start = _nodes_page * itemsPerPage;
@@ -810,7 +1037,6 @@ void TapUI::handleNodesTouch(uint16_t tx, uint16_t ty) {
     if (c.type == 0) continue;
 
     if (validCount >= start && validCount < start + itemsPerPage) {
-      // Check if DM button or card tapped
       if (ty >= y && ty <= y + 46) {
         _active_contact_idx = i;
         _current_tab = TAB_CHAT;
@@ -830,7 +1056,6 @@ void TapUI::drawChansScreen() {
   _display->setColor(COLOR_WHITE);
   _display->fillRect(0, 44, 320, 196);
 
-  // Sub-tabs: [ CHANNELS ] vs [ ROOM SERVERS (BBS) ]
   _display->setColor(!_show_rooms_subview ? COLOR_NAVY : COLOR_LIGHT_GRAY);
   _display->fillRect(10, 48, 145, 24);
   _display->setColor(COLOR_DARK_GRAY);
@@ -847,7 +1072,6 @@ void TapUI::drawChansScreen() {
   drawStr(182, 56, "ROOM SERVERS (BBS)");
 
   if (!_show_rooms_subview) {
-    // Show Channels List
     int y = 80;
     for (int i = 0; i < 4; i++) {
       ChannelDetails ch;
@@ -867,7 +1091,6 @@ void TapUI::drawChansScreen() {
       else snprintf(chName, sizeof(chName), "Ch #%d: #%s", i, ch.name[0] ? ch.name : "Group");
       drawStr(20, y + 13, chName);
 
-      // Select / Active Button
       if (isActive) {
         _display->setColor(COLOR_GREEN_BTN);
         _display->fillRect(225, y + 6, 75, 24);
@@ -882,7 +1105,6 @@ void TapUI::drawChansScreen() {
       y += 40;
     }
   } else {
-    // Show Room Servers
     int y = 80;
     int roomCount = 0;
     int total_slots = the_mesh.getTotalContactSlots();
@@ -891,20 +1113,21 @@ void TapUI::drawChansScreen() {
       ContactInfo c;
       if (!the_mesh.getContactByIdx(i, c)) continue;
       if (c.type == 3) { // ADV_TYPE_ROOM
-        _display->setColor(COLOR_LIGHT_GRAY);
+        _display->setColor(COLOR_CARD_ROOM_BG);
         _display->fillRect(10, y, 300, 38);
-        _display->setColor(COLOR_PURPLE_BTN);
+        _display->setColor(COLOR_CARD_ROOM_BD);
         _display->drawRect(10, y, 300, 38);
+        _display->fillRect(10, y, 6, 38);
 
         _display->setColor(COLOR_NAVY);
-        drawStr(20, y + 8, c.name[0] ? c.name : "BBS Room Server");
+        drawStr(22, y + 8, c.name[0] ? c.name : "BBS Room Server");
 
         _display->setColor(COLOR_DARK_GRAY);
         char idBuf[20];
         mesh::Utils::toHex(idBuf, c.id.pub_key, 4);
         char sub[32];
         snprintf(sub, sizeof(sub), "Room ID: !%s", idBuf);
-        drawStr(20, y + 22, sub);
+        drawStr(22, y + 22, sub);
 
         _display->setColor(COLOR_PURPLE_BTN);
         _display->fillRect(220, y + 7, 80, 24);
@@ -931,7 +1154,6 @@ void TapUI::drawChansScreen() {
 }
 
 void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
-  // Sub-tabs: Y in 48..72
   if (ty >= 48 && ty <= 72) {
     if (tx >= 10 && tx <= 155) {
       _show_rooms_subview = false;
@@ -946,12 +1168,11 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
   }
 
   if (!_show_rooms_subview) {
-    // Channel selection: Y in 80..240
     int y = 80;
     for (int i = 0; i < 4; i++) {
       if (ty >= y && ty <= y + 36) {
         _active_channel = i;
-        _active_contact_idx = -1; // Broadcast channel mode
+        _active_contact_idx = -1;
         _current_tab = TAB_CHAT;
         _needs_full_redraw = true;
         return;
@@ -962,7 +1183,7 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
 }
 
 // -------------------------------------------------------------
-// GPS SCREEN (Meshtastic Simple UI Style)
+// GPS SCREEN (Baud Rate Settings & Real-Time Diagnostics)
 // -------------------------------------------------------------
 void TapUI::drawGPSScreen() {
   _display->setColor(COLOR_WHITE);
@@ -972,7 +1193,7 @@ void TapUI::drawGPSScreen() {
   bool hasLoc = (loc != nullptr && loc->isEnabled());
   bool fixValid = (hasLoc && loc->isValid());
 
-  // Status Banner
+  // Status Banner: Y in 48..74
   _display->setColor(fixValid ? COLOR_GREEN_BTN : (hasLoc ? COLOR_ORANGE_BTN : COLOR_LIGHT_GRAY));
   _display->fillRect(10, 48, 300, 26);
   _display->setColor(COLOR_DARK_GRAY);
@@ -988,19 +1209,19 @@ void TapUI::drawGPSScreen() {
     drawStr(70, 56, "[ GPS RECEIVER STANDBY ]");
   }
 
-  // Telemetry Card: Y in 80..184
+  // Telemetry Card: Y in 78..184
   _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(10, 80, 300, 104);
+  _display->fillRect(10, 78, 300, 106);
   _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(10, 80, 300, 104);
+  _display->drawRect(10, 78, 300, 106);
 
   _display->setTextSize(1);
   _display->setColor(COLOR_NAVY);
 
-  char buf[64];
+  char buf[70];
   long sats = (loc && loc->isEnabled()) ? loc->satellitesCount() : 0;
   snprintf(buf, sizeof(buf), "Satellites Tracked: %ld in view", sats);
-  drawStr(20, 88, buf);
+  drawStr(18, 84, buf);
 
   double lat = 0.0, lon = 0.0;
   long alt = 0;
@@ -1012,49 +1233,88 @@ void TapUI::drawGPSScreen() {
 
   _display->setColor(COLOR_BLACK);
   if (fixValid) {
-    snprintf(buf, sizeof(buf), "Latitude:   %.6f deg %c", fabs(lat), lat >= 0 ? 'N' : 'S');
-    drawStr(20, 104, buf);
-
-    snprintf(buf, sizeof(buf), "Longitude:  %.6f deg %c", fabs(lon), lon >= 0 ? 'E' : 'W');
-    drawStr(20, 120, buf);
-
-    snprintf(buf, sizeof(buf), "Altitude:   %ld m (%ld ft)", alt, (long)(alt * 3.28084));
-    drawStr(20, 136, buf);
+    snprintf(buf, sizeof(buf), "Latitude:  %.6f deg %c", fabs(lat), lat >= 0 ? 'N' : 'S');
+    drawStr(18, 98, buf);
+    snprintf(buf, sizeof(buf), "Longitude: %.6f deg %c", fabs(lon), lon >= 0 ? 'E' : 'W');
+    drawStr(18, 112, buf);
+    snprintf(buf, sizeof(buf), "Altitude:  %ld m (%ld ft)", alt, (long)(alt * 3.28084));
+    drawStr(18, 126, buf);
   } else {
     _display->setColor(COLOR_DARK_GRAY);
-    drawStr(20, 104, "Latitude:   Waiting for fix...");
-    drawStr(20, 120, "Longitude:  Waiting for fix...");
-    drawStr(20, 136, "Altitude:   Waiting for fix...");
+    drawStr(18, 98, "Latitude:  Waiting for fix...");
+    drawStr(18, 112, "Longitude: Waiting for fix...");
+    drawStr(18, 126, "Altitude:  Waiting for fix...");
   }
 
-  char diag[40];
+  // Diagnostics row
+  char diag[45];
   if (loc) loc->formatDiagnostics(diag, sizeof(diag));
-  else strcpy(diag, "Serial1 NMEA (9600 baud)");
-  snprintf(buf, sizeof(buf), "Diagnostics: %s", diag);
+  else strcpy(diag, "en:1 sat:0 fix:0");
+  snprintf(buf, sizeof(buf), "Diag: %s", diag);
   _display->setColor(COLOR_MED_GRAY);
-  drawStr(20, 154, buf);
+  drawStr(18, 142, buf);
 
-  // Buttons: Broadcast Location & GPS toggle
-  // Broadcast Location: X in 10..200, Y in 192..230
+  // Baud & Pin Settings row: Y in 158..178
+  _display->setColor(COLOR_NAVY);
+  snprintf(buf, sizeof(buf), "Baud: %lu", _gps_baud);
+  drawStr(18, 163, buf);
+
+  // [CHG BAUD] button: X in 110..185
   _display->setColor(COLOR_BLUE_KEY);
-  _display->fillRect(10, 192, 190, 38);
-  _display->setColor(COLOR_DARK_GRAY);
-  _display->drawRect(10, 192, 190, 38);
+  _display->fillRect(110, 158, 75, 20);
   _display->setColor(COLOR_WHITE);
-  drawStr(32, 206, "BROADCAST LOCATION");
+  drawStr(118, 164, "CHG BAUD");
 
-  // GPS Toggle button: X in 210..310, Y in 192..230
-  _display->setColor(hasLoc ? COLOR_GREEN_BTN : COLOR_MED_GRAY);
-  _display->fillRect(210, 192, 100, 38);
+  // [PINS: RX/TX] button: X in 195..302
+  _display->setColor(COLOR_CYAN_BTN);
+  _display->fillRect(195, 158, 107, 20);
+  _display->setColor(COLOR_BLACK);
+  drawStr(202, 164, _gps_pins_swapped ? "PINS: RX16/TX15" : "PINS: RX15/TX16");
+
+  // Action Buttons: Y in 190..232
+  // [ BROADCAST LOCATION ]: X in 10..200
+  _display->setColor(COLOR_BLUE_KEY);
+  _display->fillRect(10, 190, 190, 38);
   _display->setColor(COLOR_DARK_GRAY);
-  _display->drawRect(210, 192, 100, 38);
+  _display->drawRect(10, 190, 190, 38);
   _display->setColor(COLOR_WHITE);
-  drawStr(226, 206, hasLoc ? "GPS: ON" : "GPS: OFF");
+  drawStr(32, 204, "BROADCAST LOCATION");
+
+  // [ GPS ON/OFF ]: X in 210..310
+  _display->setColor(hasLoc ? COLOR_GREEN_BTN : COLOR_MED_GRAY);
+  _display->fillRect(210, 190, 100, 38);
+  _display->setColor(COLOR_DARK_GRAY);
+  _display->drawRect(210, 190, 100, 38);
+  _display->setColor(COLOR_WHITE);
+  drawStr(226, 204, hasLoc ? "GPS: ON" : "GPS: OFF");
 }
 
 void TapUI::handleGPSTouch(uint16_t tx, uint16_t ty) {
-  // Broadcast Location button: X in 10..200, Y in 192..230
-  if (tx >= 10 && tx <= 200 && ty >= 192 && ty <= 230) {
+  // [CHG BAUD] button: X in 110..185, Y in 158..180
+  if (tx >= 110 && tx <= 185 && ty >= 158 && ty <= 180) {
+    int bIdx = 0;
+    for (int i = 0; i < NUM_GPS_BAUDS; i++) {
+      if (GPS_BAUD_OPTIONS[i] == _gps_baud) {
+        bIdx = (i + 1) % NUM_GPS_BAUDS;
+        break;
+      }
+    }
+    _gps_baud = GPS_BAUD_OPTIONS[bIdx];
+    restartGPS();
+    _needs_full_redraw = true;
+    return;
+  }
+
+  // [PINS SWAP] button: X in 195..302, Y in 158..180
+  if (tx >= 195 && tx <= 302 && ty >= 158 && ty <= 180) {
+    _gps_pins_swapped = !_gps_pins_swapped;
+    restartGPS();
+    _needs_full_redraw = true;
+    return;
+  }
+
+  // Broadcast Location button: X in 10..200, Y in 190..232
+  if (tx >= 10 && tx <= 200 && ty >= 190 && ty <= 232) {
     LocationProvider* loc = sensors.getLocationProvider();
     char locMsg[64];
     if (loc && loc->isEnabled() && loc->isValid()) {
@@ -1069,8 +1329,8 @@ void TapUI::handleGPSTouch(uint16_t tx, uint16_t ty) {
     return;
   }
 
-  // GPS On/Off Toggle: X in 210..310, Y in 192..230
-  if (tx >= 210 && tx <= 310 && ty >= 192 && ty <= 230) {
+  // GPS On/Off Toggle: X in 210..310, Y in 190..232
+  if (tx >= 210 && tx <= 310 && ty >= 190 && ty <= 232) {
     LocationProvider* loc = sensors.getLocationProvider();
     if (loc) {
       if (loc->isEnabled()) loc->stop();
@@ -1082,7 +1342,7 @@ void TapUI::handleGPSTouch(uint16_t tx, uint16_t ty) {
 }
 
 // -------------------------------------------------------------
-// RADIO CONFIG SCREEN (Single Radio Parameter Controls)
+// RADIO CONFIG SCREEN (RF Presets, Custom, Sleep & Power Off)
 // -------------------------------------------------------------
 void TapUI::drawRadioScreen() {
   _display->setColor(COLOR_WHITE);
@@ -1090,148 +1350,142 @@ void TapUI::drawRadioScreen() {
 
   _display->setTextSize(1);
 
-  // 1. Node Name row: Y in 47..68
+  // 1. Node Name row: Y in 46..66
   _display->setColor(COLOR_NAVY);
   char nameBuf[40];
-  snprintf(nameBuf, sizeof(nameBuf), "Node Name: %s", the_mesh.getNodePrefs()->node_name);
-  drawStr(10, 52, nameBuf);
+  snprintf(nameBuf, sizeof(nameBuf), "Node: %s", the_mesh.getNodePrefs()->node_name);
+  drawStr(10, 51, nameBuf);
 
   _display->setColor(COLOR_BLUE_KEY);
-  _display->fillRect(235, 47, 75, 20);
+  _display->fillRect(240, 46, 70, 20);
   _display->setColor(COLOR_WHITE);
-  drawStr(252, 53, "[EDIT]");
+  drawStr(255, 52, "[EDIT]");
 
-  // 2. Frequency row: Y in 72..93
+  // 2. RF Presets Cycler: Y in 69..91
+  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->fillRect(10, 69, 300, 22);
+  _display->setColor(COLOR_MED_GRAY);
+  _display->drawRect(10, 69, 300, 22);
+
+  // [< PRESET]
+  _display->setColor(COLOR_BLUE_KEY);
+  _display->fillRect(11, 70, 32, 20);
+  _display->setColor(COLOR_WHITE);
+  drawStr(18, 76, "<");
+
+  // Preset Name centered
+  _display->setColor(COLOR_NAVY);
+  const char* pName = (_selected_preset_idx < NUM_RF_PRESETS) ? RF_PRESETS[_selected_preset_idx].name : "Custom";
+  char pBuf[40];
+  snprintf(pBuf, sizeof(pBuf), "Preset: %s", pName);
+  drawStr(55, 76, pBuf);
+
+  // [PRESET >]
+  _display->setColor(COLOR_BLUE_KEY);
+  _display->fillRect(277, 70, 32, 20);
+  _display->setColor(COLOR_WHITE);
+  drawStr(290, 76, ">");
+
+  // 3. Frequency row: Y in 94..114
   _display->setColor(COLOR_BLACK);
   char freqBuf[32];
   snprintf(freqBuf, sizeof(freqBuf), "Freq: %.3f MHz", _radio_freq);
-  drawStr(10, 77, freqBuf);
+  drawStr(10, 99, freqBuf);
 
-  // [-125k] button: X in 140..190
   _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(140, 72, 50, 20);
+  _display->fillRect(195, 94, 50, 20);
   _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(140, 72, 50, 20);
+  _display->drawRect(195, 94, 50, 20);
   _display->setColor(COLOR_BLACK);
-  drawStr(146, 78, "-125k");
+  drawStr(201, 100, "-125k");
 
-  // [+125k] button: X in 195..245
   _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(195, 72, 50, 20);
+  _display->fillRect(255, 94, 55, 20);
   _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(195, 72, 50, 20);
+  _display->drawRect(255, 94, 55, 20);
   _display->setColor(COLOR_BLACK);
-  drawStr(201, 78, "+125k");
+  drawStr(262, 100, "+125k");
 
-  // [PRESET] button: X in 250..310
+  // 4. SF & Bandwidth row: Y in 118..138
+  char sfbwBuf[40];
+  snprintf(sfbwBuf, sizeof(sfbwBuf), "SF: %u  |  BW: %.1f kHz", _radio_sf, _radio_bw);
+  drawStr(10, 123, sfbwBuf);
+
+  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->fillRect(195, 118, 50, 20);
+  _display->setColor(COLOR_MED_GRAY);
+  _display->drawRect(195, 118, 50, 20);
+  _display->setColor(COLOR_BLACK);
+  drawStr(204, 124, "CHG SF");
+
+  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->fillRect(255, 118, 55, 20);
+  _display->setColor(COLOR_MED_GRAY);
+  _display->drawRect(255, 118, 55, 20);
+  _display->setColor(COLOR_BLACK);
+  drawStr(264, 124, "CHG BW");
+
+  // 5. CR, TX Power & Screen Sleep row: Y in 142..162
+  char crtxBuf[40];
+  snprintf(crtxBuf, sizeof(crtxBuf), "CR: 4/%u | TX: %d dBm", _radio_cr, _radio_tx_power);
+  drawStr(10, 147, crtxBuf);
+
+  // Screen Sleep button: X in 195..310
   _display->setColor(COLOR_CYAN_BTN);
-  _display->fillRect(250, 72, 60, 20);
+  _display->fillRect(195, 142, 115, 20);
   _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(250, 72, 60, 20);
+  _display->drawRect(195, 142, 115, 20);
   _display->setColor(COLOR_BLACK);
-  drawStr(258, 78, "REGION");
+  char sleepLabel[24];
+  int sIdx = 1;
+  for (int i = 0; i < NUM_SLEEP_OPTIONS; i++) {
+    if (SLEEP_TIMEOUTS[i] == _screen_sleep_seconds) { sIdx = i; break; }
+  }
+  snprintf(sleepLabel, sizeof(sleepLabel), "Sleep: %s", SLEEP_LABELS[sIdx]);
+  drawStr(205, 148, sleepLabel);
 
-  // 3. Spreading Factor row: Y in 97..118
-  char sfBuf[32];
-  snprintf(sfBuf, sizeof(sfBuf), "Spreading Factor: SF%u", _radio_sf);
-  drawStr(10, 102, sfBuf);
-
-  _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(220, 97, 40, 20);
-  _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(220, 97, 40, 20);
-  _display->setColor(COLOR_BLACK);
-  drawStr(236, 103, "-");
-
-  _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(268, 97, 40, 20);
-  _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(268, 97, 40, 20);
-  _display->setColor(COLOR_BLACK);
-  drawStr(284, 103, "+");
-
-  // 4. Bandwidth row: Y in 122..143
-  char bwBuf[32];
-  snprintf(bwBuf, sizeof(bwBuf), "Bandwidth: %.1f kHz", _radio_bw);
-  drawStr(10, 127, bwBuf);
-
-  _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(220, 122, 40, 20);
-  _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(220, 122, 40, 20);
-  _display->setColor(COLOR_BLACK);
-  drawStr(236, 128, "-");
-
-  _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(268, 122, 40, 20);
-  _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(268, 122, 40, 20);
-  _display->setColor(COLOR_BLACK);
-  drawStr(284, 128, "+");
-
-  // 5. Coding Rate & TX Power row: Y in 147..168
-  char crBuf[32];
-  snprintf(crBuf, sizeof(crBuf), "CR: 4/%u  |  TX: %d dBm", _radio_cr, _radio_tx_power);
-  drawStr(10, 152, crBuf);
-
-  // CR toggle button
-  _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(180, 147, 58, 20);
-  _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(180, 147, 58, 20);
-  _display->setColor(COLOR_BLACK);
-  drawStr(188, 153, "CHG CR");
-
-  // TX toggle button
-  _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(245, 147, 65, 20);
-  _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(245, 147, 65, 20);
-  _display->setColor(COLOR_BLACK);
-  drawStr(253, 153, "CHG TX");
-
-  // 6. Identity hex / status notification: Y in 172..192
+  // 6. Pubkey / status notification row: Y in 166..186
   if (millis() < _radio_status_expiry) {
     _display->setColor(COLOR_GREEN_BTN);
-    drawStr(10, 175, _radio_status_msg);
+    drawStr(10, 170, _radio_status_msg);
   } else {
     _display->setColor(COLOR_DARK_GRAY);
     char idHex[20];
     mesh::Utils::toHex(idHex, the_mesh.self_id.pub_key, 6);
     char idBuf[40];
-    snprintf(idBuf, sizeof(idBuf), "Pubkey Prefix: %s...", idHex);
-    drawStr(10, 175, idBuf);
+    snprintf(idBuf, sizeof(idBuf), "Pubkey: !%s...", idHex);
+    drawStr(10, 170, idBuf);
   }
 
-  // 7. Action Buttons: Y in 198..234
-  // [ APPLY & SAVE ] (X in 10..120)
+  // 7. Action Buttons: Y in 192..232
+  // [ APPLY & SAVE ]: X in 10..115
   _display->setColor(COLOR_GREEN_BTN);
-  _display->fillRect(10, 198, 110, 36);
+  _display->fillRect(10, 192, 105, 38);
   _display->setColor(COLOR_DARK_GRAY);
-  _display->drawRect(10, 198, 110, 36);
+  _display->drawRect(10, 192, 105, 38);
   _display->setColor(COLOR_WHITE);
-  drawStr(22, 211, "APPLY & SAVE");
+  drawStr(18, 206, "APPLY & SAVE");
 
-  // [ BEACON ] (X in 128..218)
+  // [ BEACON ]: X in 122..205
   _display->setColor(COLOR_BLUE_KEY);
-  _display->fillRect(128, 198, 90, 36);
+  _display->fillRect(122, 192, 83, 38);
   _display->setColor(COLOR_DARK_GRAY);
-  _display->drawRect(128, 198, 90, 36);
+  _display->drawRect(122, 192, 83, 38);
   _display->setColor(COLOR_WHITE);
-  drawStr(148, 211, "BEACON");
+  drawStr(140, 206, "BEACON");
 
-  // [ REBOOT ] (X in 226..310)
+  // [ POWER OFF ]: X in 212..310
   _display->setColor(COLOR_RED_BTN);
-  _display->fillRect(226, 198, 84, 36);
+  _display->fillRect(212, 192, 98, 38);
   _display->setColor(COLOR_DARK_GRAY);
-  _display->drawRect(226, 198, 84, 36);
+  _display->drawRect(212, 192, 98, 38);
   _display->setColor(COLOR_WHITE);
-  drawStr(248, 211, "REBOOT");
+  drawStr(226, 206, "POWER OFF");
 }
 
 void TapUI::handleRadioTouch(uint16_t tx, uint16_t ty) {
-  // [EDIT NAME]: X in 235..310, Y in 47..68
-  if (tx >= 235 && tx <= 310 && ty >= 47 && ty <= 68) {
+  // [EDIT NAME]: X in 240..310, Y in 46..66
+  if (tx >= 240 && tx <= 310 && ty >= 46 && ty <= 66) {
     _editing_node_name = true;
     strncpy(_text_buffer, the_mesh.getNodePrefs()->node_name, sizeof(_text_buffer) - 1);
     _text_buffer[sizeof(_text_buffer) - 1] = 0;
@@ -1241,83 +1495,81 @@ void TapUI::handleRadioTouch(uint16_t tx, uint16_t ty) {
     return;
   }
 
-  // Frequency adjustments: Y in 72..93
-  if (ty >= 72 && ty <= 93) {
-    if (tx >= 140 && tx <= 190) { // -125k
+  // Preset Prev/Next: Y in 69..91
+  if (ty >= 69 && ty <= 91) {
+    if (tx >= 10 && tx <= 50) { // Prev preset
+      int p = _selected_preset_idx - 1;
+      if (p < 0) p = NUM_RF_PRESETS - 1;
+      if (p == NUM_RF_PRESETS - 1) _selected_preset_idx = p;
+      else applyRFPreset(p);
+      _needs_full_redraw = true;
+      return;
+    }
+    if (tx >= 270 && tx <= 310) { // Next preset
+      int p = (_selected_preset_idx + 1) % NUM_RF_PRESETS;
+      if (p == NUM_RF_PRESETS - 1) _selected_preset_idx = p;
+      else applyRFPreset(p);
+      _needs_full_redraw = true;
+      return;
+    }
+  }
+
+  // Freq Steppers: Y in 94..114
+  if (ty >= 94 && ty <= 114) {
+    if (tx >= 195 && tx <= 245) { // -125k
       _radio_freq -= 0.125f;
       if (_radio_freq < 400.0f) _radio_freq = 400.0f;
+      _selected_preset_idx = 8; // Custom
       _needs_full_redraw = true;
       return;
     }
-    if (tx >= 195 && tx <= 245) { // +125k
+    if (tx >= 255 && tx <= 310) { // +125k
       _radio_freq += 0.125f;
       if (_radio_freq > 930.0f) _radio_freq = 930.0f;
-      _needs_full_redraw = true;
-      return;
-    }
-    if (tx >= 250 && tx <= 310) { // Cycle region presets
-      static uint8_t s_reg_idx = 0;
-      s_reg_idx = (s_reg_idx + 1) % NUM_REGION_FREQS;
-      _radio_freq = REGION_FREQS[s_reg_idx];
+      _selected_preset_idx = 8; // Custom
       _needs_full_redraw = true;
       return;
     }
   }
 
-  // SF adjustments: Y in 97..118
-  if (ty >= 97 && ty <= 118) {
-    if (tx >= 220 && tx <= 260 && _radio_sf > 7) {
-      _radio_sf--;
-      _needs_full_redraw = true;
-      return;
-    }
-    if (tx >= 268 && tx <= 308 && _radio_sf < 12) {
+  // SF & BW toggles: Y in 118..138
+  if (ty >= 118 && ty <= 138) {
+    if (tx >= 195 && tx <= 245) { // CHG SF
       _radio_sf++;
+      if (_radio_sf > 12) _radio_sf = 7;
+      _selected_preset_idx = 8; // Custom
       _needs_full_redraw = true;
       return;
     }
-  }
-
-  // Bandwidth adjustments: Y in 122..143
-  if (ty >= 122 && ty <= 143) {
-    if (tx >= 220 && tx <= 260) {
-      if (_radio_bw == 500.0f) _radio_bw = 250.0f;
-      else if (_radio_bw == 250.0f) _radio_bw = 125.0f;
-      else if (_radio_bw == 125.0f) _radio_bw = 62.5f;
-      _needs_full_redraw = true;
-      return;
-    }
-    if (tx >= 268 && tx <= 308) {
-      if (_radio_bw == 62.5f) _radio_bw = 125.0f;
+    if (tx >= 255 && tx <= 310) { // CHG BW
+      if (_radio_bw == 500.0f) _radio_bw = 62.5f;
+      else if (_radio_bw == 62.5f) _radio_bw = 125.0f;
       else if (_radio_bw == 125.0f) _radio_bw = 250.0f;
-      else if (_radio_bw == 250.0f) _radio_bw = 500.0f;
+      else _radio_bw = 500.0f;
+      _selected_preset_idx = 8; // Custom
       _needs_full_redraw = true;
       return;
     }
   }
 
-  // CR & TX adjustments: Y in 147..168
-  if (ty >= 147 && ty <= 168) {
-    if (tx >= 180 && tx <= 238) { // Toggle CR: 5, 6, 7, 8
-      _radio_cr++;
-      if (_radio_cr > 8) _radio_cr = 5;
-      _needs_full_redraw = true;
-      return;
+  // Sleep setting toggle: X in 195..310, Y in 142..162
+  if (tx >= 195 && tx <= 310 && ty >= 142 && ty <= 162) {
+    int sIdx = 1;
+    for (int i = 0; i < NUM_SLEEP_OPTIONS; i++) {
+      if (SLEEP_TIMEOUTS[i] == _screen_sleep_seconds) {
+        sIdx = (i + 1) % NUM_SLEEP_OPTIONS;
+        break;
+      }
     }
-    if (tx >= 245 && tx <= 310) { // Toggle TX: 14, 17, 20, 22
-      if (_radio_tx_power == 14) _radio_tx_power = 17;
-      else if (_radio_tx_power == 17) _radio_tx_power = 20;
-      else if (_radio_tx_power == 20) _radio_tx_power = 22;
-      else _radio_tx_power = 14;
-      _needs_full_redraw = true;
-      return;
-    }
+    _screen_sleep_seconds = SLEEP_TIMEOUTS[sIdx];
+    _needs_full_redraw = true;
+    return;
   }
 
-  // Action Buttons: Y in 198..234
-  if (ty >= 198 && ty <= 234) {
-    // [ APPLY & SAVE ]: X in 10..120
-    if (tx >= 10 && tx <= 120) {
+  // Action Buttons: Y in 192..232
+  if (ty >= 192 && ty <= 232) {
+    // [ APPLY & SAVE ]: X in 10..115
+    if (tx >= 10 && tx <= 115) {
       NodePrefs* prefs = the_mesh.getNodePrefs();
       if (prefs) {
         prefs->freq = _radio_freq;
@@ -1336,8 +1588,8 @@ void TapUI::handleRadioTouch(uint16_t tx, uint16_t ty) {
       return;
     }
 
-    // [ BEACON ]: X in 128..218
-    if (tx >= 128 && tx <= 218) {
+    // [ BEACON ]: X in 122..205
+    if (tx >= 122 && tx <= 205) {
       the_mesh.advert();
       strcpy(_radio_status_msg, "Advert Beacon Broadcasted!");
       _radio_status_expiry = millis() + 3000;
@@ -1345,9 +1597,9 @@ void TapUI::handleRadioTouch(uint16_t tx, uint16_t ty) {
       return;
     }
 
-    // [ REBOOT ]: X in 226..310
-    if (tx >= 226 && tx <= 310) {
-      NVIC_SystemReset();
+    // [ POWER OFF ]: X in 212..310
+    if (tx >= 212 && tx <= 310) {
+      powerOff();
       return;
     }
   }

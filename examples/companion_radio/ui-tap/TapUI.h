@@ -5,7 +5,7 @@
 #include <helpers/ui/FT6336Touch.h>
 #include "../MyMesh.h"
 
-#define MAX_UI_MESSAGES 12
+#define MAX_UI_MESSAGES 24
 #define MAX_MSG_TEXT_LEN 64
 
 struct UIMessage {
@@ -13,6 +13,9 @@ struct UIMessage {
   char text[MAX_MSG_TEXT_LEN];
   bool is_outgoing;
   bool is_direct;
+  uint8_t channel_idx;
+  uint8_t contact_pubkey[4];
+  char target_name[24];
 };
 
 enum TapTab {
@@ -29,6 +32,14 @@ enum KeyboardMode {
   KB_SYMBOLS = 2
 };
 
+struct RFPreset {
+  const char* name;
+  float freq;
+  uint8_t sf;
+  float bw;
+  uint8_t cr;
+};
+
 class TapUI {
 private:
   DisplayDriver* _display;
@@ -37,8 +48,16 @@ private:
   TapTab _current_tab;
   KeyboardMode _kb_mode;
   bool _needs_full_redraw;
+  bool _needs_chat_messages_redraw;
   unsigned long _last_status_ms;
   bool _backlight_on;
+
+  // Power & Sleep Management
+  uint32_t _screen_sleep_seconds; // 30, 60, 120, 300, 0=never
+  unsigned long _last_activity_ms;
+  bool _is_screen_sleeping;
+  unsigned long _touch_down_ms;
+  bool _touch_is_down;
 
   // Active channel / DM target
   uint8_t _active_channel;
@@ -61,13 +80,17 @@ private:
   // Nodes scroll / page offset
   int _nodes_page;
 
-  // Radio adjustment parameters (staged before apply)
+  // GPS Settings
+  uint32_t _gps_baud;
+  bool _gps_pins_swapped;
+
+  // Radio adjustment parameters & presets
+  int _selected_preset_idx; // 0..NUM_PRESETS (last is Custom)
   float _radio_freq;
   uint8_t _radio_sf;
   float _radio_bw;
   uint8_t _radio_cr;
   int8_t _radio_tx_power;
-  bool _radio_rx_boost;
   char _radio_status_msg[32];
   unsigned long _radio_status_expiry;
 
@@ -78,6 +101,7 @@ private:
   void drawStatusBar();
   void drawTabBar();
   void drawChatScreen();
+  void drawChatMessagesOnly();
   void drawNodesScreen();
   void drawChansScreen();
   void drawGPSScreen();
@@ -95,6 +119,8 @@ private:
 
   void appendChar(char c);
   void deleteChar();
+  void applyRFPreset(int preset_idx);
+  void restartGPS();
 
 public:
   TapUI();
@@ -104,11 +130,18 @@ public:
 
   void cycleTab();
   void toggleBacklight();
+  void wakeScreen();
   void markNeedsRedraw() { _needs_full_redraw = true; }
+  void markNeedsChatRedraw() { _needs_chat_messages_redraw = true; }
+  TapTab getCurrentTab() const { return _current_tab; }
 
-  void addReceivedMessage(const char* sender, const char* text, bool isDirect);
+  void addReceivedMessage(const char* sender, const char* text, bool isDirect, const uint8_t* pubkey = nullptr);
+  void addReceivedChannelMessage(uint8_t channel_idx, const char* channel_name, const char* sender, const char* text);
   void addSentMessage(const char* text);
   void sendMessage(const char* text);
+
+  void handlePhysicalButtonPress();
+  void powerOff();
 
   uint8_t getActiveChannel() const { return _active_channel; }
 };
