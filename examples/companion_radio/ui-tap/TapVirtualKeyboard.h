@@ -18,7 +18,7 @@ private:
   int8_t _highlighted_col;
   unsigned long _highlight_expiry;
 
-  void drawKey(DisplayDriver* display, int x, int y, int w, int h, const char* label, bool highlighted = false, ColorVal customBkg = 0);
+  void drawKey(DisplayDriver* display, int x, int y, int w, int h, const char* label, bool highlighted = false, ColorVal customBkg = 0, ColorVal customTxt = 0);
 
 public:
   TapVirtualKeyboard();

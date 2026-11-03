@@ -24,7 +24,7 @@ private:
 
   TapTab _current_tab;
   uint8_t _contact_scroll_offset;
-  unsigned long _last_redraw_ms;
+  unsigned long _last_status_ms;
   bool _needs_full_redraw;
 
   // Cached status values
