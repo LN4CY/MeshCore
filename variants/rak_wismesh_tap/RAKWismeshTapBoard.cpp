@@ -49,6 +49,10 @@ void RAKWismeshTapBoard::begin() {
   // Initialize battery reading
   pinMode(PIN_VBAT_READ, INPUT);
 
+#if defined(PIN_USER_BTN) && (PIN_USER_BTN >= 0)
+  pinMode(PIN_USER_BTN, INPUT_PULLUP);
+#endif
+
   // Turn on WisBlock 3V3_S slot power (WB_IO2 / Pin 34)
   pinMode(PIN_WISBLOCK_3V3_S, OUTPUT);
   digitalWrite(PIN_WISBLOCK_3V3_S, HIGH);
