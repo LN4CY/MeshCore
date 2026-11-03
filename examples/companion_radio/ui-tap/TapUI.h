@@ -5,7 +5,7 @@
 #include <helpers/ui/FT6336Touch.h>
 #include "../MyMesh.h"
 
-#define MAX_UI_MESSAGES 24
+#define MAX_UI_MESSAGES 64
 #define MAX_MSG_TEXT_LEN 64
 
 struct UIMessage {
@@ -13,9 +13,21 @@ struct UIMessage {
   char text[MAX_MSG_TEXT_LEN];
   bool is_outgoing;
   bool is_direct;
+  bool unread;
   uint8_t channel_idx;
   uint8_t contact_pubkey[4];
   char target_name[24];
+  uint32_t timestamp;
+};
+
+struct DiscoveredNodeItem {
+  char name[28];
+  char id_hex[10];
+  uint8_t type;
+  bool is_fav;
+  uint8_t unread_dm;
+  int32_t lat, lon;
+  int contact_idx;
 };
 
 enum TapTab {
@@ -56,7 +68,7 @@ struct TapDeviceSettings {
   uint8_t brightness_pct;
   uint8_t ble_enabled;
   uint8_t gps_pins_swapped;
-  uint8_t reserved;
+  uint8_t dark_mode; // 1 = dark theme (default), 0 = light theme
   uint32_t screen_sleep_secs;
   uint32_t gps_baud;
 };
@@ -76,6 +88,7 @@ private:
   bool _backlight_on;
   uint8_t _brightness_pct;
   bool _ble_enabled;
+  bool _dark_mode;
 
   // Power & Sleep Management
   uint32_t _screen_sleep_seconds; // 30, 60, 120, 300, 0=never
@@ -98,9 +111,10 @@ private:
   // Subview in TAB_RADIO: 0 = RF & LoRa, 1 = Device & Sys
   uint8_t _radio_subview;
 
-  // Messages log
+  // Messages log & scroll state
   UIMessage _messages[MAX_UI_MESSAGES];
   uint8_t _msg_count;
+  int _chat_scroll_offset; // 0 = latest at bottom, >0 = scrolled up N messages
 
   // Text buffer for full keyboard input
   char _text_buffer[MAX_MSG_TEXT_LEN];
@@ -120,13 +134,26 @@ private:
   float _radio_bw;
   uint8_t _radio_cr;
   int8_t _radio_tx_power;
-  uint8_t _radio_path_hash_mode;
+  uint8_t _radio_path_hash_mode; // 0=1B, 1=2B, 2=3B
   char _radio_status_msg[42];
   unsigned long _radio_status_expiry;
+
+  // Theme color helpers
+  uint16_t colBg() const { return _dark_mode ? 0x0000 : 0xFFFF; }
+  uint16_t colPanelBg() const { return _dark_mode ? 0x1082 : 0xE73C; }
+  uint16_t colCardBg() const { return _dark_mode ? 0x18E3 : 0xDEFB; }
+  uint16_t colKeyBg() const { return _dark_mode ? 0x2124 : 0xFFFF; }
+  uint16_t colText() const { return _dark_mode ? 0xFFFF : 0x0000; }
+  uint16_t colSubText() const { return _dark_mode ? 0xBDF7 : 0x4208; }
+  uint16_t colMutedText() const { return _dark_mode ? 0x8410 : 0x8410; }
+  uint16_t colTitle() const { return _dark_mode ? 0x07FF : 0x1994; }
+  uint16_t colBorder() const { return _dark_mode ? 0x4A49 : 0x8410; }
 
   void drawStr(int x, int y, const char* str) {
     if (_display) _display->drawTextLeftAlign(x, y, str);
   }
+
+  int buildSortedContactList(DiscoveredNodeItem* items, int max_items) const;
 
   void drawStatusBar();
   void drawTabBar();
@@ -171,6 +198,11 @@ public:
   void saveDeviceSettings();
   void syncRadioParamsFromPrefs();
 
+  // Theme & Display management
+  bool isDarkMode() const { return _dark_mode; }
+  void setDarkMode(bool dark, bool persist = true);
+  static uint8_t calcBatteryPercent(uint16_t mv);
+
   // Tab & Screen management
   void cycleTab();
   void toggleBacklight();
@@ -208,9 +240,21 @@ public:
   bool clearChannel(uint8_t idx);
   void persistChannels();
 
+  // Contact Favorites & Unread helpers
+  bool toggleContactFavorite(int contact_idx);
+  bool setContactFavorite(int contact_idx, bool fav);
+  int getTotalUnreadCount() const;
+  int getChannelUnreadCount(uint8_t channel_idx) const;
+  int getContactUnreadCount(const uint8_t* pubkey_prefix) const;
+  uint8_t getMessageCount() const { return _msg_count; }
+  const UIMessage& getMessage(uint8_t idx) const { return _messages[idx]; }
+  void markAllMessagesRead();
+
   // Radio & GPS helpers
   void applyRFPreset(int preset_idx);
   void applyAndSaveRadioParams();
+  uint8_t getPathHashMode() const { return _radio_path_hash_mode; }
+  void setPathHashMode(uint8_t mode);
   int getSelectedPresetIdx() const { return _selected_preset_idx; }
   static int getNumPresets();
   static const RFPreset& getPreset(int idx);

@@ -211,14 +211,15 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
     Serial.println("System:   ver | board | status | reboot | poweroff | start ota | erase | save | apply");
     Serial.println("Stats:    stats-core | stats-radio | stats-packets | clear stats");
     Serial.println("Clock:    clock | clock sync | clock gps | clock set <YYYY-MM-DD HH:MM:SS> | clock adjust <sec> | time <epoch>");
-    Serial.println("Mesh/RF:  advert | advert.zerohop | presets | preset <0-26|name>");
+    Serial.println("Mesh/RF:  advert | advert.zerohop | presets | preset <0-26|name> | hash [1b|2b|3b]");
     Serial.println("Channels: channels | channel get <0-7> | channel set <0-7> <name> [hex/b64_key]");
     Serial.println("          channel hashtag <0-7> <#tag> | channel public <0-7> | channel random <0-7> [name]");
     Serial.println("          channel clear <0-7> | channel use <0-7>");
-    Serial.println("Contacts: contacts | contact remove <idx> | send chan <0-7> <msg> | send dm <name|idx> <msg>");
-    Serial.println("Device:   ble [on|off|status|unpair|pin <6digits>] | brightness [5-100] | sleep [0|30|60|120|300]");
+    Serial.println("Contacts: contacts | contact fav <name|idx> [on|off] | contact remove <idx>");
+    Serial.println("Messages: messages [all|unread] | send chan <0-7> <msg> | send dm <name|idx> <msg>");
+    Serial.println("Device:   ble [on|off|status|unpair|pin <6digits>] | brightness [5-100] | sleep [0|30|60|120|300] | theme [dark|light]");
     Serial.println("GPS/Sens: gps [on|off|sync|setloc <lat> <lon>|baud <rate>|swap] | sensor list | sensor get <k> | sensor set <k> <v>");
-    Serial.println("Get/Set:  get/set name|freq|sf|bw|cr|tx|radio|lat|lon|ble.pin|ble|brightness|sleep|gps.baud|gps.swap");
+    Serial.println("Get/Set:  get/set name|freq|sf|bw|cr|tx|hash|radio|lat|lon|ble.pin|ble|brightness|sleep|theme|gps.baud|gps.swap");
     Serial.println("          get/set af|int.thresh|agc.reset.interval|multi.acks|rxdelay|txdelay|direct.txdelay|dutycycle");
     Serial.println("          get/set cad|path.hash.mode|adc.multiplier|prv.key|pub.key|manual.add.contacts|client.repeat");
     strcpy(reply, "OK - full command reference printed to Serial. Key cmds: status, channels, contacts, ble, clock, brightness, sleep, get/set, apply");
@@ -276,10 +277,12 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
   if (strcmp(command, "status") == 0) {
     char dtStr[32];
     ui.formatLocalDateTime(dtStr, sizeof(dtStr), true, false);
-    snprintf(reply, 160, "Node:%s | %.3fMHz SF%u BW%.0f TX%udBm | Batt:%umV | BLE:%s(PIN:%06lu) | Brt:%u%% Slp:%lus | %s UTC",
-             prefs->node_name, prefs->freq, prefs->sf, prefs->bw, prefs->tx_power_dbm,
-             getBattMilliVolts(), ui.isBLEEnabled() ? "ON" : "OFF", (unsigned long)the_mesh.getBLEPin(),
-             ui.getBrightnessPct(), (unsigned long)ui.getScreenSleepSeconds(), dtStr);
+    uint16_t mv = getBattMilliVolts();
+    uint8_t bpct = TapUI::calcBatteryPercent(mv);
+    snprintf(reply, 160, "Node:%s | %.3fMHz SF%u BW%.1f TX%udBm %uB | Batt:%u%%(%umV) | BLE:%s(PIN:%06lu) | Theme:%s | %s UTC",
+             prefs->node_name, prefs->freq, prefs->sf, prefs->bw, prefs->tx_power_dbm, prefs->path_hash_mode + 1,
+             bpct, mv, ui.isBLEEnabled() ? "ON" : "OFF", (unsigned long)the_mesh.getBLEPin(),
+             ui.isDarkMode() ? "DARK" : "LIGHT", dtStr);
     return true;
   }
   if (memcmp(command, "stats-core", 10) == 0) {
@@ -604,21 +607,98 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
     }
   }
 
-  // ---------------- CONTACTS & MESSAGING COMMANDS ----------------
+  // ---------------- CONTACTS, FAVORITES & MESSAGING COMMANDS ----------------
   if (strcmp(command, "contacts") == 0) {
     int total = the_mesh.getTotalContactSlots();
     int count = 0;
-    Serial.println("\r\n=== Discovered Mesh Contacts ===");
-    for (int i = 8; i < total; i++) {
-      ContactInfo c;
-      if (!the_mesh.getContactByIdx(i, c) || c.type == 0) continue;
-      char idHex[12];
-      mesh::Utils::toHex(idHex, c.id.pub_key, 4);
-      Serial.printf(" [%d] Name='%s' | ID=!%s | Type=%u | Lat=%.4f Lon=%.4f\r\n",
-                    i, c.name, idHex, c.type, (double)c.gps_lat / 1e6, (double)c.gps_lon / 1e6);
-      count++;
+    int favCount = 0;
+    Serial.println("\r\n=== Discovered Mesh Contacts (Favorites First) ===");
+    for (int pass = 0; pass < 2; pass++) {
+      for (int i = 8; i < total; i++) {
+        ContactInfo c;
+        if (!the_mesh.getContactByIdx(i, c) || c.type == 0) continue;
+        bool fav = c.isFav();
+        if ((pass == 0 && !fav) || (pass == 1 && fav)) continue;
+        if (fav) favCount++;
+        char idHex[12];
+        mesh::Utils::toHex(idHex, c.id.pub_key, 4);
+        Serial.printf(" [%d] %sName='%s' | ID=!%s | Type=%u | Flags=0x%02X | Lat=%.4f Lon=%.4f\r\n",
+                      i, fav ? "[*FAV] " : "       ", c.name, idHex, c.type, c.flags,
+                      (double)c.gps_lat / 1e6, (double)c.gps_lon / 1e6);
+        count++;
+      }
     }
-    snprintf(reply, 120, "%d contacts discovered (details printed to Serial)", count);
+    snprintf(reply, 140, "%d contacts (%d favorites) listed on Serial", count, favCount);
+    return true;
+  }
+  if (memcmp(command, "contact fav ", 12) == 0 || memcmp(command, "fav ", 4) == 0) {
+    const char* p = (memcmp(command, "fav ", 4) == 0) ? (command + 4) : (command + 12);
+    while (*p == ' ') p++;
+    if (*p == 0) {
+      strcpy(reply, "Usage: contact fav <name_or_idx> [on|off]");
+      return true;
+    }
+    char target[32];
+    const char* opt = strchr(p, ' ');
+    if (opt) {
+      size_t tlen = (size_t)(opt - p);
+      if (tlen >= sizeof(target)) tlen = sizeof(target) - 1;
+      memcpy(target, p, tlen);
+      target[tlen] = 0;
+      while (*opt == ' ') opt++;
+    } else {
+      strncpy(target, p, sizeof(target) - 1);
+      target[sizeof(target) - 1] = 0;
+    }
+
+    int total = the_mesh.getTotalContactSlots();
+    int foundIdx = -1;
+    if (target[0] >= '0' && target[0] <= '9') {
+      foundIdx = atoi(target);
+    } else {
+      for (int i = 8; i < total; i++) {
+        ContactInfo c;
+        if (the_mesh.getContactByIdx(i, c) && c.type != 0 && strcasecmp(c.name, target) == 0) {
+          foundIdx = i;
+          break;
+        }
+      }
+    }
+
+    ContactInfo c;
+    if (foundIdx >= 8 && the_mesh.getContactByIdx(foundIdx, c) && c.type != 0) {
+      bool newFav = !c.isFav();
+      if (opt && *opt) {
+        newFav = (strcasecmp(opt, "on") == 0 || strcmp(opt, "1") == 0 || strcasecmp(opt, "true") == 0);
+      }
+      ui.setContactFavorite(foundIdx, newFav);
+      snprintf(reply, 120, "OK - Contact [%d] '%s' favorite set to %s",
+               foundIdx, c.name, newFav ? "ON (*FAV)" : "OFF");
+    } else {
+      strcpy(reply, "ERR: contact not found (use 'contacts' to see list)");
+    }
+    return true;
+  }
+  if (memcmp(command, "messages", 8) == 0 || strcmp(command, "inbox") == 0) {
+    const char* sub = (memcmp(command, "messages", 8) == 0) ? (command + 8) : "";
+    while (*sub == ' ') sub++;
+    bool onlyUnread = (strcasecmp(sub, "unread") == 0 || strcasecmp(sub, "new") == 0);
+    uint8_t total = ui.getMessageCount();
+    int unread = ui.getTotalUnreadCount();
+    Serial.printf("\r\n=== Messages (%u stored, %d unread) ===\r\n", total, unread);
+    for (uint8_t i = 0; i < total; i++) {
+      const UIMessage& m = ui.getMessage(i);
+      if (onlyUnread && !m.unread) continue;
+      Serial.printf(" [%2u] %s %s (%s): %s\r\n",
+                    i, m.unread ? "[UNREAD]" : "        ",
+                    m.sender, m.is_direct ? "DM" : m.target_name, m.text);
+    }
+    if (strcasecmp(sub, "read") == 0 || strcasecmp(sub, "clear-unread") == 0) {
+      ui.markAllMessagesRead();
+      strcpy(reply, "OK - All messages marked as read");
+    } else {
+      snprintf(reply, 140, "%u messages in history (%d unread) - printed to Serial", total, unread);
+    }
     return true;
   }
   if (memcmp(command, "contact remove ", 15) == 0) {
@@ -748,6 +828,38 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
     uint32_t secs = (strcasecmp(sub, "never") == 0 || strcasecmp(sub, "off") == 0) ? 0 : (uint32_t)atol(sub);
     ui.setScreenSleepSeconds(secs, true);
     snprintf(reply, 80, "OK - Screen sleep timeout set to %lu s", (unsigned long)secs);
+    return true;
+  }
+  if (memcmp(command, "theme", 5) == 0 && (command[5] == 0 || command[5] == ' ')) {
+    const char* sub = command + 5;
+    while (*sub == ' ') sub++;
+    if (*sub == 0) {
+      snprintf(reply, 60, "> %s", ui.isDarkMode() ? "dark" : "light");
+      return true;
+    }
+    bool dark = !(strcasecmp(sub, "light") == 0 || strcasecmp(sub, "lite") == 0 || strcmp(sub, "0") == 0);
+    ui.setDarkMode(dark, true);
+    snprintf(reply, 80, "OK - UI theme set to %s", dark ? "DARK" : "LIGHT");
+    return true;
+  }
+  if (memcmp(command, "hash", 4) == 0 && (command[4] == 0 || command[4] == ' ')) {
+    const char* sub = command + 4;
+    while (*sub == ' ') sub++;
+    if (*sub == 0) {
+      snprintf(reply, 60, "> %uB (path.hash.mode=%u)", prefs->path_hash_mode + 1, prefs->path_hash_mode);
+      return true;
+    }
+    int val = atoi(sub);
+    uint8_t mode = 0xFF;
+    if (strcasecmp(sub, "1b") == 0 || val == 1) mode = 0;
+    else if (strcasecmp(sub, "2b") == 0 || val == 2) mode = 1;
+    else if (strcasecmp(sub, "3b") == 0 || val == 3) mode = 2;
+    if (mode <= 2) {
+      ui.setPathHashMode(mode);
+      snprintf(reply, 80, "OK - Path hash size set to %uB (mode %u)", mode + 1, mode);
+    } else {
+      strcpy(reply, "Usage: hash <1b|2b|3b>");
+    }
     return true;
   }
 
@@ -901,6 +1013,14 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
     }
     if (strcmp(config, "sleep") == 0) {
       snprintf(reply, 40, "> %lu", (unsigned long)ui.getScreenSleepSeconds());
+      return true;
+    }
+    if (strcmp(config, "theme") == 0) {
+      snprintf(reply, 40, "> %s", ui.isDarkMode() ? "dark" : "light");
+      return true;
+    }
+    if (strcmp(config, "hash") == 0 || strcmp(config, "path.hash") == 0) {
+      snprintf(reply, 60, "> %uB (mode %u)", prefs->path_hash_mode + 1, prefs->path_hash_mode);
       return true;
     }
     if (strcmp(config, "gps.baud") == 0) {
@@ -1080,6 +1200,30 @@ bool RAKWismeshTapBoard::handleCommand(const char* command, uint32_t sender_time
       uint32_t secs = (strcasecmp(val, "never") == 0 || strcasecmp(val, "off") == 0) ? 0 : (uint32_t)atol(val);
       ui.setScreenSleepSeconds(secs, true);
       snprintf(reply, 80, "OK - Sleep timeout %lu s", (unsigned long)secs);
+      return true;
+    }
+    if (memcmp(config, "theme ", 6) == 0) {
+      const char* val = config + 6;
+      while (*val == ' ') val++;
+      bool dark = !(strcasecmp(val, "light") == 0 || strcasecmp(val, "lite") == 0 || strcmp(val, "0") == 0);
+      ui.setDarkMode(dark, true);
+      snprintf(reply, 80, "OK - Theme set to %s", dark ? "DARK" : "LIGHT");
+      return true;
+    }
+    if (memcmp(config, "hash ", 5) == 0 || memcmp(config, "path.hash ", 10) == 0) {
+      const char* val = strchr(config, ' ') + 1;
+      while (*val == ' ') val++;
+      int n = atoi(val);
+      uint8_t mode = 0xFF;
+      if (strcasecmp(val, "1b") == 0 || n == 1) mode = 0;
+      else if (strcasecmp(val, "2b") == 0 || n == 2) mode = 1;
+      else if (strcasecmp(val, "3b") == 0 || n == 3) mode = 2;
+      if (mode <= 2) {
+        ui.setPathHashMode(mode);
+        snprintf(reply, 80, "OK - Path hash size set to %uB (mode %u)", mode + 1, mode);
+      } else {
+        strcpy(reply, "ERR: specify 1B, 2B, or 3B");
+      }
       return true;
     }
     if (memcmp(config, "gps.baud ", 9) == 0) {

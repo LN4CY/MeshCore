@@ -22,9 +22,10 @@ extern UITask ui_task;
 extern DataStore store;
 
 #define TAP_SETTINGS_FILE  "/tap_settings.bin"
-#define TAP_SETTINGS_MAGIC 0x54415031UL // "TAP1"
+#define TAP_SETTINGS_MAGIC 0x54415032UL // "TAP2" (defaults to dark_mode = 1)
 
 #define COLOR_NAVY       0x1994
+#define COLOR_DARK_HDR   0x0863
 #define COLOR_WHITE      0xFFFF
 #define COLOR_BLACK      0x0000
 #define COLOR_GRAY_BG    0xE73C
@@ -35,12 +36,11 @@ extern DataStore store;
 #define COLOR_GREEN_BTN  0x05E0
 #define COLOR_RED_BTN    0xD800
 #define COLOR_ORANGE_BTN 0xFC00
+#define COLOR_GOLD_STAR  0xFEA0
 #define COLOR_PURPLE_BTN 0x791B
 #define COLOR_CYAN_BTN   0x04F7
-#define COLOR_ACTIVE_TAB 0xFFFF
-#define COLOR_INACT_TAB  0xC618
 
-// Node Card Colors by Contact Type
+// Light mode Node Card Colors
 #define COLOR_CARD_CLIENT_BG   0xFFFF
 #define COLOR_CARD_CLIENT_BD   0x2A69
 #define COLOR_CARD_REPEAT_BG   0xFFFA
@@ -49,6 +49,12 @@ extern DataStore store;
 #define COLOR_CARD_ROOM_BD     0x791B
 #define COLOR_CARD_SENSOR_BG   0xEFFE
 #define COLOR_CARD_SENSOR_BD   0x04F7
+
+// Dark mode Node Card Colors
+#define COLOR_DK_CLIENT_BG     0x0842
+#define COLOR_DK_REPEAT_BG     0x20E0
+#define COLOR_DK_ROOM_BG       0x1863
+#define COLOR_DK_SENSOR_BG     0x0123
 
 static const char* QUICK_RESPONSES[] = {
   "OK",
@@ -97,7 +103,7 @@ static const uint32_t GPS_BAUD_OPTIONS[] = { 9600, 19200, 38400, 57600, 115200 }
 static const int NUM_GPS_BAUDS = 5;
 
 static const uint32_t SLEEP_TIMEOUTS[] = { 30, 60, 120, 300, 0 }; // 0 = never
-static const char* SLEEP_LABELS[] = { "30s", "1m", "2m", "5m", "Never" };
+static const char* SLEEP_LABELS[] = { "30s", "1m", "2m", "5m", "Off" };
 static const int NUM_SLEEP_OPTIONS = 5;
 
 static const uint8_t BRIGHTNESS_STEPS[] = { 10, 25, 50, 75, 100 };
@@ -108,6 +114,19 @@ static bool isChannelSecretZero(const uint8_t* secret, size_t len) {
     if (secret[i] != 0) return false;
   }
   return true;
+}
+
+uint8_t TapUI::calcBatteryPercent(uint16_t mv) {
+  if (mv >= 4180) return 100;
+  if (mv <= 3250) return 0;
+  // Standard single-cell LiPo discharge curve approximation
+  if (mv >= 4000) {
+    return 80 + (uint8_t)(((uint32_t)(mv - 4000) * 20UL) / 180UL);
+  }
+  if (mv >= 3700) {
+    return 25 + (uint8_t)(((uint32_t)(mv - 3700) * 55UL) / 300UL);
+  }
+  return (uint8_t)(((uint32_t)(mv - 3250) * 25UL) / 450UL);
 }
 
 int TapUI::getNumPresets() {
@@ -132,7 +151,8 @@ TapUI::TapUI()
     _backlight_on(true),
     _brightness_pct(100),
     _ble_enabled(true),
-    _screen_sleep_seconds(60), // 1 min default
+    _dark_mode(true), // Dark theme by default for lower power consumption
+    _screen_sleep_seconds(60),
     _last_activity_ms(0),
     _is_screen_sleeping(false),
     _touch_down_ms(0),
@@ -145,6 +165,7 @@ TapUI::TapUI()
     _edit_chan_key_len(16),
     _radio_subview(0),
     _msg_count(0),
+    _chat_scroll_offset(0),
     _text_len(0),
     _nodes_page(0),
     _gps_baud(9600),
@@ -174,6 +195,7 @@ void TapUI::loadDeviceSettings() {
       }
       _ble_enabled = (s.ble_enabled != 0);
       _gps_pins_swapped = (s.gps_pins_swapped != 0);
+      _dark_mode = (s.dark_mode != 0);
       _screen_sleep_seconds = s.screen_sleep_secs;
       if (s.gps_baud >= 4800 && s.gps_baud <= 921600) {
         _gps_baud = s.gps_baud;
@@ -189,7 +211,7 @@ void TapUI::saveDeviceSettings() {
   s.brightness_pct = _brightness_pct;
   s.ble_enabled = _ble_enabled ? 1 : 0;
   s.gps_pins_swapped = _gps_pins_swapped ? 1 : 0;
-  s.reserved = 0;
+  s.dark_mode = _dark_mode ? 1 : 0;
   s.screen_sleep_secs = _screen_sleep_seconds;
   s.gps_baud = _gps_baud;
 
@@ -203,6 +225,12 @@ void TapUI::saveDeviceSettings() {
   }
 }
 
+void TapUI::setDarkMode(bool dark, bool persist) {
+  _dark_mode = dark;
+  if (persist) saveDeviceSettings();
+  _needs_full_redraw = true;
+}
+
 void TapUI::syncRadioParamsFromPrefs() {
   NodePrefs* prefs = the_mesh.getNodePrefs();
   if (prefs) {
@@ -211,10 +239,9 @@ void TapUI::syncRadioParamsFromPrefs() {
     if (prefs->bw > 5.0f) _radio_bw = prefs->bw;
     if (prefs->cr >= 5 && prefs->cr <= 8) _radio_cr = prefs->cr;
     if (prefs->tx_power_dbm != 0) _radio_tx_power = prefs->tx_power_dbm;
-    _radio_path_hash_mode = prefs->path_hash_mode;
+    _radio_path_hash_mode = (prefs->path_hash_mode <= 2) ? prefs->path_hash_mode : 0;
 
     _selected_preset_idx = NUM_RF_PRESETS - 1; // Custom
-    // First pass: check primary presets (USA=23, EU/UK Narrow=8) and exact path_hash_mode matches
     for (int p = NUM_RF_PRESETS - 2; p >= 0; p--) {
       uint8_t p_mode = (RF_PRESETS[p].path_hash_size > 0) ? (RF_PRESETS[p].path_hash_size - 1) : 0;
       if (fabs(_radio_freq - RF_PRESETS[p].freq) < 0.005f &&
@@ -223,7 +250,7 @@ void TapUI::syncRadioParamsFromPrefs() {
           _radio_cr == RF_PRESETS[p].cr &&
           _radio_path_hash_mode == p_mode) {
         _selected_preset_idx = p;
-        if (p == 23 || p == 8) break; // Prefer USA / EU/UK (Narrow) over identical regional duplicates
+        if (p == 23 || p == 8) break; // Prefer USA / EU/UK (Narrow)
       }
     }
   }
@@ -324,8 +351,6 @@ void TapUI::clearBLEBonds() {
 
 void TapUI::formatLocalDateTime(char* out, size_t max_len, bool include_date, bool include_tz) const {
   uint32_t utc = the_mesh.getRTCClock()->getCurrentTime();
-  // Default to NodePrefs.adc_multiplier or store timezone in RTC? Let's use simple UTC or local offset
-  // Wait: does NodePrefs have timezone? No, let's check if we store utc_offset in TapDeviceSettings or static!
   time_t local_t = (time_t)utc;
   struct tm tm_info;
   gmtime_r(&local_t, &tm_info);
@@ -348,14 +373,12 @@ bool TapUI::parseAndSetLocalDateTime(const char* str) {
   int yr = 0, mo = 0, dy = 0, hr = 0, mn = 0, sc = 0;
   int matched = sscanf(str, "%d-%d-%d %d:%d:%d", &yr, &mo, &dy, &hr, &mn, &sc);
   if (matched < 5) {
-    // Also support YYYY/MM/DD HH:MM(:SS)
     matched = sscanf(str, "%d/%d/%d %d:%d:%d", &yr, &mo, &dy, &hr, &mn, &sc);
   }
   if (matched < 5) return false;
   if (yr < 2020 || yr > 2099 || mo < 1 || mo > 12 || dy < 1 || dy > 31) return false;
   if (hr < 0 || hr > 23 || mn < 0 || mn > 59 || sc < 0 || sc > 59) return false;
 
-  // Convert Y-M-D H:M:S to Unix epoch (UTC)
   static const int days_before_month[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
   uint32_t days = (yr - 1970) * 365 + (yr - 1969) / 4 - (yr - 1901) / 100 + (yr - 1601) / 400;
   days += days_before_month[mo - 1];
@@ -394,6 +417,7 @@ void TapUI::setActiveChannel(uint8_t idx) {
   if (idx < MAX_GROUP_CHANNELS) {
     _active_channel = idx;
     _active_contact_idx = -1;
+    _chat_scroll_offset = 0;
     _needs_full_redraw = true;
   }
 }
@@ -502,6 +526,98 @@ bool TapUI::clearChannel(uint8_t idx) {
     return true;
   }
   return false;
+}
+
+// -------------------------------------------------------------
+// CONTACT FAVORITES & UNREAD MESSAGE HELPERS
+// -------------------------------------------------------------
+bool TapUI::setContactFavorite(int contact_idx, bool fav) {
+  ContactInfo c;
+  if (!the_mesh.getContactByIdx(contact_idx, c) || c.type == 0) return false;
+  ContactInfo* live = the_mesh.lookupContactByPubKey(c.id.pub_key, PUB_KEY_SIZE);
+  if (!live) return false;
+  if (fav) live->flags |= 0x01;
+  else live->flags &= ~0x01;
+  store.saveContacts(&the_mesh);
+  _needs_full_redraw = true;
+  return true;
+}
+
+bool TapUI::toggleContactFavorite(int contact_idx) {
+  ContactInfo c;
+  if (!the_mesh.getContactByIdx(contact_idx, c) || c.type == 0) return false;
+  return setContactFavorite(contact_idx, !c.isFav());
+}
+
+int TapUI::getTotalUnreadCount() const {
+  int cnt = 0;
+  for (int i = 0; i < _msg_count; i++) {
+    if (_messages[i].unread) cnt++;
+  }
+  return cnt;
+}
+
+int TapUI::getChannelUnreadCount(uint8_t channel_idx) const {
+  int cnt = 0;
+  for (int i = 0; i < _msg_count; i++) {
+    if (_messages[i].unread && !_messages[i].is_direct && _messages[i].channel_idx == channel_idx) {
+      cnt++;
+    }
+  }
+  return cnt;
+}
+
+int TapUI::getContactUnreadCount(const uint8_t* pubkey_prefix) const {
+  if (!pubkey_prefix) return 0;
+  int cnt = 0;
+  for (int i = 0; i < _msg_count; i++) {
+    if (_messages[i].unread && _messages[i].is_direct &&
+        memcmp(_messages[i].contact_pubkey, pubkey_prefix, 4) == 0) {
+      cnt++;
+    }
+  }
+  return cnt;
+}
+
+void TapUI::markAllMessagesRead() {
+  for (int i = 0; i < _msg_count; i++) {
+    _messages[i].unread = false;
+  }
+  _needs_full_redraw = true;
+}
+
+int TapUI::buildSortedContactList(DiscoveredNodeItem* items, int max_items) const {
+  int total_slots = the_mesh.getTotalContactSlots();
+  int count = 0;
+
+  // Pass 0: Favorites first (pass == 0), then non-favorites (pass == 1)
+  for (int pass = 0; pass < 2; pass++) {
+    for (int i = 8; i < total_slots && count < max_items; i++) {
+      ContactInfo c;
+      if (!the_mesh.getContactByIdx(i, c)) continue;
+      if (c.type == 0) continue; // ADV_TYPE_NONE
+
+      bool fav = c.isFav();
+      if ((pass == 0 && !fav) || (pass == 1 && fav)) continue;
+
+      if (c.name[0] != 0) {
+        strncpy(items[count].name, c.name, 27);
+        items[count].name[27] = 0;
+      } else {
+        snprintf(items[count].name, sizeof(items[count].name), "!%02X%02X%02X%02X",
+                 c.id.pub_key[0], c.id.pub_key[1], c.id.pub_key[2], c.id.pub_key[3]);
+      }
+      mesh::Utils::toHex(items[count].id_hex, c.id.pub_key, 4);
+      items[count].type = c.type;
+      items[count].is_fav = fav;
+      items[count].unread_dm = (uint8_t)getContactUnreadCount(c.id.pub_key);
+      items[count].lat = c.gps_lat;
+      items[count].lon = c.gps_lon;
+      items[count].contact_idx = i;
+      count++;
+    }
+  }
+  return count;
 }
 
 void TapUI::restartGPS() {
@@ -706,6 +822,18 @@ void TapUI::applyRFPreset(int preset_idx) {
   _needs_full_redraw = true;
 }
 
+void TapUI::setPathHashMode(uint8_t mode) {
+  if (mode > 2) return;
+  _radio_path_hash_mode = mode;
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  if (prefs) {
+    prefs->path_hash_mode = mode;
+    the_mesh.savePrefs();
+  }
+  syncRadioParamsFromPrefs();
+  _needs_full_redraw = true;
+}
+
 void TapUI::applyAndSaveRadioParams() {
   NodePrefs* prefs = the_mesh.getNodePrefs();
   if (prefs) {
@@ -719,7 +847,7 @@ void TapUI::applyAndSaveRadioParams() {
   }
   radio_driver.setParams(_radio_freq, _radio_bw, _radio_sf, _radio_cr);
   radio_driver.setTxPower(_radio_tx_power);
-  showStatusNotification("Radio Applied & Saved!");
+  showStatusNotification("Radio & Hash Mode Applied!");
 }
 
 void TapUI::addReceivedMessage(const char* sender, const char* text, bool isDirect, const uint8_t* pubkey) {
@@ -738,13 +866,29 @@ void TapUI::addReceivedMessage(const char* sender, const char* text, bool isDire
   m->is_outgoing = false;
   m->is_direct = isDirect;
   m->channel_idx = 0;
+  m->timestamp = the_mesh.getRTCClock()->getCurrentTime();
   if (pubkey) memcpy(m->contact_pubkey, pubkey, 4);
   else memset(m->contact_pubkey, 0, 4);
   strncpy(m->target_name, sender ? sender : "", sizeof(m->target_name) - 1);
   m->target_name[sizeof(m->target_name) - 1] = 0;
 
+  // Check if user is currently viewing this exact DM conversation at the bottom
+  bool viewing_now = (!_is_screen_sleeping && _current_tab == TAB_CHAT && _edit_mode == EDIT_NONE &&
+                      _chat_scroll_offset == 0 && _active_contact_idx >= 0);
+  if (viewing_now) {
+    ContactInfo active_c;
+    if (the_mesh.getContactByIdx(_active_contact_idx, active_c)) {
+      if (pubkey && memcmp(pubkey, active_c.id.pub_key, 4) != 0) viewing_now = false;
+    } else {
+      viewing_now = false;
+    }
+  }
+  m->unread = !viewing_now;
+
   if (_current_tab == TAB_CHAT) {
     _needs_chat_messages_redraw = true;
+  } else {
+    _needs_full_redraw = true;
   }
 }
 
@@ -764,12 +908,19 @@ void TapUI::addReceivedChannelMessage(uint8_t channel_idx, const char* channel_n
   m->is_outgoing = false;
   m->is_direct = false;
   m->channel_idx = channel_idx;
+  m->timestamp = the_mesh.getRTCClock()->getCurrentTime();
   memset(m->contact_pubkey, 0, 4);
   strncpy(m->target_name, channel_name ? channel_name : "Public", sizeof(m->target_name) - 1);
   m->target_name[sizeof(m->target_name) - 1] = 0;
 
+  bool viewing_now = (!_is_screen_sleeping && _current_tab == TAB_CHAT && _edit_mode == EDIT_NONE &&
+                      _chat_scroll_offset == 0 && _active_contact_idx == -1 && _active_channel == channel_idx);
+  m->unread = !viewing_now;
+
   if (_current_tab == TAB_CHAT && _active_contact_idx == -1 && _active_channel == channel_idx) {
     _needs_chat_messages_redraw = true;
+  } else {
+    _needs_full_redraw = true;
   }
 }
 
@@ -786,6 +937,8 @@ void TapUI::addSentMessage(const char* text) {
   strncpy(m->text, text ? text : "", sizeof(m->text) - 1);
   m->text[sizeof(m->text) - 1] = 0;
   m->is_outgoing = true;
+  m->unread = false;
+  m->timestamp = the_mesh.getRTCClock()->getCurrentTime();
 
   if (_active_contact_idx >= 0) {
     m->is_direct = true;
@@ -807,6 +960,7 @@ void TapUI::addSentMessage(const char* text) {
     }
   }
 
+  _chat_scroll_offset = 0; // Jump to latest when sending
   if (_current_tab == TAB_CHAT) {
     _needs_chat_messages_redraw = true;
   }
@@ -843,13 +997,12 @@ void TapUI::update() {
   }
 
   TouchPoint pt;
-  _touch.poll(pt);  // NOTE: poll() returns false on release, so always inspect pt fields
+  _touch.poll(pt);
   _touch_is_down = pt.isPressed;
   {
     if (pt.justPressed) {
       _last_activity_ms = now;
 
-      // If screen was sleeping, wake it up and consume the first tap
       if (_is_screen_sleeping) {
         wakeScreen();
         return;
@@ -858,7 +1011,6 @@ void TapUI::update() {
       uint16_t tx = pt.x;
       uint16_t ty = pt.y;
 
-      // Check tab bar touch: Y in 20..42
       if (ty >= 20 && ty <= 42) {
         handleTabTouch(tx, ty);
       } else {
@@ -873,13 +1025,11 @@ void TapUI::update() {
     }
   }
 
-  // Smooth selective redraws
   if (_needs_full_redraw) {
     _needs_full_redraw = false;
     _needs_chat_messages_redraw = false;
 
-    // Redraw screen content area cleanly
-    _display->setColor(COLOR_WHITE);
+    _display->setColor(colBg());
     _display->fillRect(0, 44, 320, 196);
 
     drawStatusBar();
@@ -897,6 +1047,7 @@ void TapUI::update() {
     _needs_chat_messages_redraw = false;
     if (_current_tab == TAB_CHAT) {
       drawChatMessagesOnly();
+      drawTabBar();
     }
   } else if (now - _last_status_ms > 4000) {
     drawStatusBar();
@@ -905,18 +1056,18 @@ void TapUI::update() {
 }
 
 void TapUI::drawStatusBar() {
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(_dark_mode ? COLOR_DARK_HDR : COLOR_NAVY);
   _display->fillRect(0, 0, 320, 20);
 
   _display->setTextSize(1);
   _display->setColor(COLOR_WHITE);
 
-  // Left: Recipient info (truncated to ~12 chars so status items fit cleanly)
-  char recBuf[18];
+  // 1. Left: Active Target (X = 3..63, max 10 chars)
+  char recBuf[14];
   if (_active_contact_idx >= 0) {
     ContactInfo c;
     if (the_mesh.getContactByIdx(_active_contact_idx, c)) {
-      if (c.name[0] != 0) snprintf(recBuf, sizeof(recBuf), "@%.11s", c.name);
+      if (c.name[0] != 0) snprintf(recBuf, sizeof(recBuf), "@%.9s", c.name);
       else snprintf(recBuf, sizeof(recBuf), "@!%02X%02X%02X", c.id.pub_key[0], c.id.pub_key[1], c.id.pub_key[2]);
     } else {
       strcpy(recBuf, "@Node");
@@ -924,82 +1075,110 @@ void TapUI::drawStatusBar() {
   } else {
     ChannelDetails ch;
     if (the_mesh.getChannel(_active_channel, ch)) {
-      if (ch.name[0] == '#') snprintf(recBuf, sizeof(recBuf), "%.12s", ch.name);
-      else snprintf(recBuf, sizeof(recBuf), "#%.11s", ch.name[0] ? ch.name : "Public");
+      if (ch.name[0] == '#') snprintf(recBuf, sizeof(recBuf), "%.10s", ch.name);
+      else snprintf(recBuf, sizeof(recBuf), "#%.9s", ch.name[0] ? ch.name : "Public");
     } else {
       strcpy(recBuf, "#Public");
     }
   }
-  drawStr(4, 5, recBuf);
+  drawStr(3, 5, recBuf);
 
-  // Center-Left: BLE status
+  // 2. BLE Status / PIN (X = 66..126)
   if (!_ble_enabled) {
-    _display->setColor(COLOR_LIGHT_GRAY);
-    drawStr(88, 5, "BT:OFF");
+    _display->setColor(COLOR_MED_GRAY);
+    drawStr(66, 5, "BT:OFF");
   } else if (ui_task.hasConnection()) {
     _display->setColor(COLOR_GREEN_BTN);
-    drawStr(88, 5, "BT:CONN");
+    drawStr(66, 5, "BT:CONN");
   } else if (the_mesh.getBLEPin() != 0) {
-    char pinBuf[16];
+    char pinBuf[14];
     snprintf(pinBuf, sizeof(pinBuf), "PIN:%06lu", (unsigned long)the_mesh.getBLEPin());
     _display->setColor(COLOR_ORANGE_BTN);
-    drawStr(84, 5, pinBuf);
+    drawStr(66, 5, pinBuf);
   } else {
     _display->setColor(COLOR_GREEN_BTN);
-    drawStr(88, 5, "BT:ON");
+    drawStr(66, 5, "BT:ON");
   }
 
-  // Center-Right: GPS status
+  // 3. GPS Status (X = 130..166)
   LocationProvider* loc = sensors.getLocationProvider();
   if (loc && loc->isEnabled()) {
     if (loc->isValid()) {
-      char gpsBuf[14];
-      snprintf(gpsBuf, sizeof(gpsBuf), "GPS:%ld", loc->satellitesCount());
+      char gpsBuf[10];
+      snprintf(gpsBuf, sizeof(gpsBuf), "G:%ld", loc->satellitesCount());
       _display->setColor(COLOR_GREEN_BTN);
-      drawStr(152, 5, gpsBuf);
+      drawStr(130, 5, gpsBuf);
     } else {
       _display->setColor(COLOR_ORANGE_BTN);
-      drawStr(152, 5, "GPS:..");
+      drawStr(130, 5, "G:..");
     }
   } else {
-    _display->setColor(COLOR_LIGHT_GRAY);
-    drawStr(152, 5, "GPS:--");
+    _display->setColor(COLOR_MED_GRAY);
+    drawStr(130, 5, "G:--");
   }
 
-  // Clock HH:MM
+  // 4. Clock HH:MM (X = 166..196)
   char clkBuf[10];
   formatLocalDateTime(clkBuf, sizeof(clkBuf), false, false);
   _display->setColor(COLOR_WHITE);
-  drawStr(204, 5, clkBuf);
+  drawStr(166, 5, clkBuf);
 
-  // Right: Battery voltage
-  uint32_t mv = board.getBattMilliVolts();
-  char batBuf[10];
-  snprintf(batBuf, sizeof(batBuf), "%.2fV", (float)mv / 1000.0f);
+  // 5. Battery Icon + Percentage + Voltage (X = 202..318)
+  uint16_t mv = board.getBattMilliVolts();
+  uint8_t pct = calcBatteryPercent(mv);
+  uint16_t batCol = (pct > 40) ? COLOR_GREEN_BTN : ((pct > 18) ? COLOR_ORANGE_BTN : COLOR_RED_BTN);
+
+  // Draw battery outline (16x10 at x=202, y=5) + positive terminal nub (2x4 at x=218, y=8)
   _display->setColor(COLOR_WHITE);
-  drawStr(278, 5, batBuf);
+  _display->drawRect(202, 5, 16, 10);
+  _display->fillRect(218, 8, 2, 4);
+  int fillW = (pct * 12) / 100;
+  if (fillW > 0) {
+    _display->setColor(batCol);
+    _display->fillRect(204, 7, fillW, 6);
+  }
+
+  char batBuf[18];
+  snprintf(batBuf, sizeof(batBuf), "%u%% %.2fV", pct, (float)mv / 1000.0f);
+  _display->setColor(batCol);
+  drawStr(223, 5, batBuf);
 }
 
 void TapUI::drawTabBar() {
-  _display->setColor(COLOR_GRAY_BG);
+  _display->setColor(colPanelBg());
   _display->fillRect(0, 20, 320, 23);
 
-  const char* tabs[5] = { "CHAT", "NODES", "CHANS", "GPS", "RADIO" };
+  int totalUnread = getTotalUnreadCount();
+  char chatTabLabel[12];
+  if (totalUnread > 0) {
+    snprintf(chatTabLabel, sizeof(chatTabLabel), "CHAT(%d)", totalUnread > 9 ? 9 : totalUnread);
+  } else {
+    strcpy(chatTabLabel, "CHAT");
+  }
+
+  const char* tabs[5] = { chatTabLabel, "NODES", "CHANS", "GPS", "RADIO" };
   for (int i = 0; i < 5; i++) {
     int x = i * 64;
     bool isActive = (i == (int)_current_tab);
-    _display->setColor(isActive ? COLOR_ACTIVE_TAB : COLOR_INACT_TAB);
+
+    uint16_t tabBg = isActive ? (_dark_mode ? 0x2124 : COLOR_WHITE) : (_dark_mode ? 0x0841 : 0xC618);
+    _display->setColor(tabBg);
     _display->fillRect(x + 1, 21, 62, 21);
 
-    _display->setColor(isActive ? COLOR_NAVY : COLOR_DARK_GRAY);
+    _display->setColor(isActive ? colTitle() : colBorder());
     _display->drawRect(x + 1, 21, 62, 21);
 
     _display->setTextSize(1);
+    if (i == 0 && totalUnread > 0 && !isActive) {
+      _display->setColor(COLOR_ORANGE_BTN);
+    } else {
+      _display->setColor(isActive ? colTitle() : colSubText());
+    }
     int tw = strlen(tabs[i]) * 6;
     drawStr(x + (64 - tw) / 2, 27, tabs[i]);
 
     if (isActive) {
-      _display->setColor(COLOR_NAVY);
+      _display->setColor(colTitle());
       _display->fillRect(x + 2, 40, 60, 2);
     }
   }
@@ -1018,7 +1197,7 @@ void TapUI::handleTabTouch(uint16_t tx, uint16_t ty) {
 }
 
 // -------------------------------------------------------------
-// CHAT SCREEN & GENERALIZED KEYBOARD INPUT
+// CHAT SCREEN, SCROLLBACK & GENERALIZED KEYBOARD INPUT
 // -------------------------------------------------------------
 void TapUI::drawChatScreen() {
   drawChatMessagesOnly();
@@ -1028,11 +1207,11 @@ void TapUI::drawChatScreen() {
 
 void TapUI::drawChatMessagesOnly() {
   // Clear strictly chat history area: Y in 44..116
-  _display->setColor(COLOR_WHITE);
+  _display->setColor(colBg());
   _display->fillRect(0, 44, 320, 73);
 
   if (_edit_mode != EDIT_NONE) {
-    _display->setColor(COLOR_NAVY);
+    _display->setColor(colTitle());
     _display->setTextSize(1);
     const char* title = "[EDITING SETTING]";
     const char* line1 = "Type value below on keyboard.";
@@ -1045,7 +1224,7 @@ void TapUI::drawChatMessagesOnly() {
         break;
       case EDIT_RADIO_FREQ:
         title = "[SET LORA FREQUENCY (MHz)]";
-        line1 = "Enter frequency in MHz (e.g. 910.525 or 869.525).";
+        line1 = "Enter frequency in MHz (e.g. 910.525 or 869.618).";
         break;
       case EDIT_BLE_PIN:
         title = "[SET 6-DIGIT BLE PAIRING PIN]";
@@ -1068,13 +1247,13 @@ void TapUI::drawChatMessagesOnly() {
 
     drawStr(8, 48, title);
 
-    // [CANCEL] button in top right of edit area: X in 245..312, Y in 46..64
+    // [CANCEL] button: X in 245..312, Y in 46..64
     _display->setColor(COLOR_RED_BTN);
     _display->fillRect(245, 46, 67, 18);
     _display->setColor(COLOR_WHITE);
     drawStr(255, 51, "CANCEL");
 
-    _display->setColor(COLOR_DARK_GRAY);
+    _display->setColor(colSubText());
     drawStr(8, 70, line1);
     drawStr(8, 86, line2);
     return;
@@ -1087,7 +1266,6 @@ void TapUI::drawChatMessagesOnly() {
     hasActiveContact = the_mesh.getContactByIdx(_active_contact_idx, active_c);
   }
 
-  // Gather matching messages
   int matchIndices[MAX_UI_MESSAGES];
   int matchCount = 0;
 
@@ -1109,13 +1287,13 @@ void TapUI::drawChatMessagesOnly() {
   }
 
   if (matchCount == 0) {
-    _display->setColor(COLOR_MED_GRAY);
+    _display->setColor(colSubText());
     _display->setTextSize(1);
     if (_active_contact_idx >= 0 && hasActiveContact) {
       char targetPrompt[64];
       snprintf(targetPrompt, sizeof(targetPrompt), "Direct Chat with @%s", active_c.name[0] ? active_c.name : "Node");
-      drawStr(30, 65, targetPrompt);
-      drawStr(45, 82, "Type message below to send private text");
+      drawStr(25, 65, targetPrompt);
+      drawStr(35, 82, "Type message below to send private text");
     } else {
       ChannelDetails ch;
       the_mesh.getChannel(_active_channel, ch);
@@ -1125,52 +1303,81 @@ void TapUI::drawChatMessagesOnly() {
       } else {
         snprintf(chPrompt, sizeof(chPrompt), "Channel #%s Broadcast (Ch #%u)", ch.name[0] ? ch.name : "Public", _active_channel);
       }
-      drawStr(30, 65, chPrompt);
-      drawStr(45, 82, "Type message below to transmit on LoRa");
+      drawStr(25, 65, chPrompt);
+      drawStr(35, 82, "Type message below to transmit on LoRa");
     }
     return;
   }
 
-  // Display up to 4 recent matching messages
-  int startIdx = 0;
-  if (matchCount > 4) startIdx = matchCount - 4;
-  int y = 46;
+  // Clamp _chat_scroll_offset
+  int maxScroll = (matchCount > 4) ? (matchCount - 4) : 0;
+  if (_chat_scroll_offset > maxScroll) _chat_scroll_offset = maxScroll;
+  if (_chat_scroll_offset < 0) _chat_scroll_offset = 0;
 
-  for (int k = startIdx; k < matchCount; k++) {
+  int endIdx = matchCount - _chat_scroll_offset;
+  int startIdx = endIdx - 4;
+  if (startIdx < 0) startIdx = 0;
+
+  int y = 46;
+  for (int k = startIdx; k < endIdx; k++) {
     UIMessage* m = &_messages[matchIndices[k]];
+    bool wasUnread = m->unread;
+    m->unread = false; // Mark read now that the user is viewing it
+
     if (m->is_outgoing) {
-      _display->setColor(COLOR_NAVY);
-      char line[70];
-      snprintf(line, sizeof(line), "You: %s", m->text);
-      drawStr(8, y, line);
+      _display->setColor(colTitle());
+      char line[50];
+      snprintf(line, sizeof(line), "You: %.40s", m->text);
+      drawStr(6, y, line);
     } else {
-      _display->setColor(COLOR_DARK_GRAY);
-      char line[70];
-      snprintf(line, sizeof(line), "%s: %s", m->sender, m->text);
-      drawStr(8, y, line);
+      _display->setColor(wasUnread ? COLOR_GOLD_STAR : colText());
+      char line[50];
+      snprintf(line, sizeof(line), "%s%s: %.36s", wasUnread ? "*" : "", m->sender, m->text);
+      drawStr(6, y, line);
     }
-    y += 16;
+    y += 17;
   }
+
+  // Right-side Scroll Bar & Controls (X in 280..318, Y in 45..115)
+  _display->setColor(colCardBg());
+  _display->fillRect(280, 45, 38, 22);
+  _display->setColor(_chat_scroll_offset < maxScroll ? colTitle() : colBorder());
+  _display->drawRect(280, 45, 38, 22);
+  _display->setColor(_chat_scroll_offset < maxScroll ? colText() : colMutedText());
+  drawStr(288, 52, "UP ^");
+
+  // Middle indicator (shows e.g. "5-8/12" or "ALL")
+  char posBuf[12];
+  snprintf(posBuf, sizeof(posBuf), "%d/%d", endIdx, matchCount);
+  _display->setColor(colSubText());
+  drawStr(282, 76, posBuf);
+
+  _display->setColor(colCardBg());
+  _display->fillRect(280, 93, 38, 22);
+  _display->setColor(_chat_scroll_offset > 0 ? colTitle() : colBorder());
+  _display->drawRect(280, 93, 38, 22);
+  _display->setColor(_chat_scroll_offset > 0 ? colText() : colMutedText());
+  drawStr(288, 100, "DN v");
 }
 
 void TapUI::drawTextInputBar() {
   // Box: Y in 118..138
-  _display->setColor(COLOR_WHITE);
+  _display->setColor(colKeyBg());
   _display->fillRect(1, 118, 318, 21);
 
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(colTitle());
   _display->drawRect(1, 118, 318, 21);
 
   _display->setTextSize(1);
   if (_text_len == 0) {
-    _display->setColor(COLOR_MED_GRAY);
+    _display->setColor(colMutedText());
     if (_edit_mode != EDIT_NONE) {
       drawStr(8, 124, "> Enter value...");
     } else {
       drawStr(8, 124, "> Type message here...");
     }
   } else {
-    _display->setColor(COLOR_BLACK);
+    _display->setColor(colText());
     char displayLine[MAX_MSG_TEXT_LEN + 4];
     snprintf(displayLine, sizeof(displayLine), "> %s_", _text_buffer);
     drawStr(8, 124, displayLine);
@@ -1179,12 +1386,11 @@ void TapUI::drawTextInputBar() {
 
 void TapUI::drawKeyboard() {
   // Keyboard area: Y in 140..239 (height 99)
-  _display->setColor(COLOR_GRAY_BG);
+  _display->setColor(colPanelBg());
   _display->fillRect(0, 140, 320, 100);
 
   _display->setTextSize(1);
 
-  // Row 0: 10 keys
   const char* r0_lower = "qwertyuiop";
   const char* r0_upper = "QWERTYUIOP";
   const char* r0_sym   = "1234567890";
@@ -1192,17 +1398,16 @@ void TapUI::drawKeyboard() {
 
   for (int k = 0; k < 10; k++) {
     int kx = 1 + k * 32;
-    _display->setColor(COLOR_WHITE);
+    _display->setColor(colKeyBg());
     _display->fillRect(kx, 142, 30, 23);
-    _display->setColor(COLOR_MED_GRAY);
+    _display->setColor(colBorder());
     _display->drawRect(kx, 142, 30, 23);
 
-    _display->setColor(COLOR_BLACK);
+    _display->setColor(colText());
     char buf[2] = { r0[k], 0 };
     drawStr(kx + 11, 149, buf);
   }
 
-  // Row 1: 9 keys
   const char* r1_lower = "asdfghjkl";
   const char* r1_upper = "ASDFGHJKL";
   const char* r1_sym   = "@#$%&*-+/";
@@ -1210,22 +1415,22 @@ void TapUI::drawKeyboard() {
 
   for (int k = 0; k < 9; k++) {
     int kx = 17 + k * 32;
-    _display->setColor(COLOR_WHITE);
+    _display->setColor(colKeyBg());
     _display->fillRect(kx, 167, 30, 23);
-    _display->setColor(COLOR_MED_GRAY);
+    _display->setColor(colBorder());
     _display->drawRect(kx, 167, 30, 23);
 
-    _display->setColor(COLOR_BLACK);
+    _display->setColor(colText());
     char buf[2] = { r1[k], 0 };
     drawStr(kx + 11, 174, buf);
   }
 
   // Row 2: Shift, 7 keys, DEL
-  _display->setColor((_kb_mode == KB_UPPER) ? COLOR_NAVY : COLOR_LIGHT_GRAY);
+  _display->setColor((_kb_mode == KB_UPPER) ? COLOR_BLUE_KEY : colCardBg());
   _display->fillRect(1, 192, 36, 23);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(1, 192, 36, 23);
-  _display->setColor((_kb_mode == KB_UPPER) ? COLOR_WHITE : COLOR_BLACK);
+  _display->setColor((_kb_mode == KB_UPPER) ? COLOR_WHITE : colText());
   drawStr(7, 199, "CAP");
 
   const char* r2_lower = "zxcvbnm";
@@ -1235,12 +1440,12 @@ void TapUI::drawKeyboard() {
 
   for (int k = 0; k < 7; k++) {
     int kx = 39 + k * 32;
-    _display->setColor(COLOR_WHITE);
+    _display->setColor(colKeyBg());
     _display->fillRect(kx, 192, 30, 23);
-    _display->setColor(COLOR_MED_GRAY);
+    _display->setColor(colBorder());
     _display->drawRect(kx, 192, 30, 23);
 
-    _display->setColor(COLOR_BLACK);
+    _display->setColor(colText());
     char buf[2] = { r2[k], 0 };
     drawStr(kx + 11, 199, buf);
   }
@@ -1248,36 +1453,36 @@ void TapUI::drawKeyboard() {
   // DEL button: X in 264..319
   _display->setColor(COLOR_RED_BTN);
   _display->fillRect(264, 192, 55, 23);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(264, 192, 55, 23);
   _display->setColor(COLOR_WHITE);
   drawStr(280, 199, "DEL");
 
   // Row 3: ?123, QUICK/CLEAR, SPACE, SEND/SAVE
-  _display->setColor((_kb_mode == KB_SYMBOLS) ? COLOR_NAVY : COLOR_LIGHT_GRAY);
+  _display->setColor((_kb_mode == KB_SYMBOLS) ? COLOR_BLUE_KEY : colCardBg());
   _display->fillRect(1, 217, 44, 22);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(1, 217, 44, 22);
-  _display->setColor((_kb_mode == KB_SYMBOLS) ? COLOR_WHITE : COLOR_BLACK);
+  _display->setColor((_kb_mode == KB_SYMBOLS) ? COLOR_WHITE : colText());
   drawStr(6, 224, (_kb_mode == KB_SYMBOLS) ? "ABC" : "?123");
 
   _display->setColor(COLOR_PURPLE_BTN);
   _display->fillRect(47, 217, 50, 22);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(47, 217, 50, 22);
   _display->setColor(COLOR_WHITE);
   drawStr(54, 224, (_edit_mode != EDIT_NONE) ? "CLEAR" : "QUICK");
 
-  _display->setColor(COLOR_WHITE);
+  _display->setColor(colKeyBg());
   _display->fillRect(99, 217, 140, 22);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(99, 217, 140, 22);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colSubText());
   drawStr(150, 224, "SPACE");
 
   _display->setColor(COLOR_GREEN_BTN);
   _display->fillRect(242, 217, 77, 22);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(242, 217, 77, 22);
   _display->setColor(COLOR_WHITE);
   drawStr(264, 224, (_edit_mode != EDIT_NONE) ? "SAVE" : "SEND");
@@ -1288,6 +1493,23 @@ void TapUI::handleChatTouch(uint16_t tx, uint16_t ty) {
     cancelKeyboardEdit();
     return;
   }
+
+  // Scroll Up / Down buttons in chat area: X in 276..319, Y in 44..116
+  if (_edit_mode == EDIT_NONE && tx >= 276 && ty >= 44 && ty <= 116) {
+    if (ty <= 74) {
+      // UP (older messages)
+      _chat_scroll_offset += 2;
+      _needs_chat_messages_redraw = true;
+      return;
+    } else if (ty >= 88) {
+      // DN (newer messages)
+      _chat_scroll_offset -= 2;
+      if (_chat_scroll_offset < 0) _chat_scroll_offset = 0;
+      _needs_chat_messages_redraw = true;
+      return;
+    }
+  }
+
   if (ty >= 140) {
     handleKeyboardTouch(tx, ty);
   }
@@ -1309,7 +1531,6 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
   const char* r2_sym   = "()!?:,.";
   const char* r2 = (_kb_mode == KB_SYMBOLS) ? r2_sym : ((_kb_mode == KB_UPPER) ? r2_upper : r2_lower);
 
-  // Row 0: Y in 142..165
   if (ty >= 142 && ty <= 165) {
     for (int k = 0; k < 10; k++) {
       int kx = 1 + k * 32;
@@ -1320,7 +1541,6 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Row 1: Y in 167..190
   if (ty >= 167 && ty <= 190) {
     for (int k = 0; k < 9; k++) {
       int kx = 17 + k * 32;
@@ -1331,7 +1551,6 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Row 2: Y in 192..215
   if (ty >= 192 && ty <= 215) {
     if (tx >= 1 && tx <= 36) {
       if (_kb_mode == KB_LOWER) _kb_mode = KB_UPPER;
@@ -1352,7 +1571,6 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Row 3: Y in 217..239
   if (ty >= 217 && ty <= 239) {
     if (tx >= 1 && tx <= 44) {
       if (_kb_mode == KB_SYMBOLS) _kb_mode = KB_LOWER;
@@ -1394,66 +1612,37 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
 }
 
 // -------------------------------------------------------------
-// NODES SCREEN
+// NODES SCREEN (Favorites First + Favorite Toggle Button + Unread Badge)
 // -------------------------------------------------------------
-struct DiscoveredNodeItem {
-  char name[28];
-  char id_hex[10];
-  uint8_t type;
-  int32_t lat, lon;
-  int contact_idx;
-};
-
 void TapUI::drawNodesScreen() {
-  _display->setColor(COLOR_WHITE);
+  _display->setColor(colBg());
   _display->fillRect(0, 44, 320, 196);
 
-  int total_slots = the_mesh.getTotalContactSlots();
-  DiscoveredNodeItem items[32];
-  int count = 0;
-
-  for (int i = 8; i < total_slots && count < 32; i++) {
-    ContactInfo c;
-    if (!the_mesh.getContactByIdx(i, c)) continue;
-    if (c.type == 0) continue; // ADV_TYPE_NONE
-
-    if (c.name[0] != 0) {
-      strncpy(items[count].name, c.name, 27);
-      items[count].name[27] = 0;
-    } else {
-      snprintf(items[count].name, sizeof(items[count].name), "!%02X%02X%02X%02X",
-               c.id.pub_key[0], c.id.pub_key[1], c.id.pub_key[2], c.id.pub_key[3]);
-    }
-    mesh::Utils::toHex(items[count].id_hex, c.id.pub_key, 4);
-    items[count].type = c.type;
-    items[count].lat = c.gps_lat;
-    items[count].lon = c.gps_lon;
-    items[count].contact_idx = i;
-    count++;
-  }
+  DiscoveredNodeItem items[48];
+  int count = buildSortedContactList(items, 48);
 
   // Header row
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(colTitle());
   _display->setTextSize(1);
-  char titleBuf[32];
-  snprintf(titleBuf, sizeof(titleBuf), "Discovered Nodes (%d)", count);
-  drawStr(10, 50, titleBuf);
+  char titleBuf[36];
+  snprintf(titleBuf, sizeof(titleBuf), "Nodes (%d) - Favorites First", count);
+  drawStr(8, 50, titleBuf);
 
   // Discover button at top right
   _display->setColor(COLOR_BLUE_KEY);
-  _display->fillRect(210, 47, 100, 19);
+  _display->fillRect(214, 47, 98, 19);
   _display->setColor(COLOR_WHITE);
-  drawStr(222, 53, "[DISCOVER]");
+  drawStr(225, 53, "[DISCOVER]");
 
   if (count == 0) {
-    _display->setColor(COLOR_DARK_GRAY);
+    _display->setColor(colSubText());
     drawStr(20, 85, "No mesh contacts discovered yet.");
     drawStr(20, 105, "Make sure other nodes are powered and in range.");
     drawStr(20, 125, "Tap [DISCOVER] above to broadcast a discovery probe.");
 
     _display->setColor(COLOR_GREEN_BTN);
     _display->fillRect(40, 155, 240, 36);
-    _display->setColor(COLOR_DARK_GRAY);
+    _display->setColor(colBorder());
     _display->drawRect(40, 155, 240, 36);
     _display->setColor(COLOR_WHITE);
     drawStr(68, 168, "SEND DISCOVERY BEACON");
@@ -1472,18 +1661,22 @@ void TapUI::drawNodesScreen() {
   for (int i = start; i < end; i++) {
     DiscoveredNodeItem* item = &items[i];
 
-    uint16_t boxBg = COLOR_CARD_CLIENT_BG;
+    uint16_t boxBg = _dark_mode ? COLOR_DK_CLIENT_BG : COLOR_CARD_CLIENT_BG;
     uint16_t boxBd = COLOR_CARD_CLIENT_BD;
 
     if (item->type == 2) {
-      boxBg = COLOR_CARD_REPEAT_BG;
+      boxBg = _dark_mode ? COLOR_DK_REPEAT_BG : COLOR_CARD_REPEAT_BG;
       boxBd = COLOR_CARD_REPEAT_BD;
     } else if (item->type == 3) {
-      boxBg = COLOR_CARD_ROOM_BG;
+      boxBg = _dark_mode ? COLOR_DK_ROOM_BG : COLOR_CARD_ROOM_BG;
       boxBd = COLOR_CARD_ROOM_BD;
     } else if (item->type == 4) {
-      boxBg = COLOR_CARD_SENSOR_BG;
+      boxBg = _dark_mode ? COLOR_DK_SENSOR_BG : COLOR_CARD_SENSOR_BG;
       boxBd = COLOR_CARD_SENSOR_BD;
+    }
+
+    if (item->is_fav) {
+      boxBd = COLOR_GOLD_STAR;
     }
 
     _display->setColor(boxBg);
@@ -1492,52 +1685,71 @@ void TapUI::drawNodesScreen() {
     _display->drawRect(8, y, 304, 46);
     _display->fillRect(8, y, 6, 46);
 
-    _display->setColor(COLOR_NAVY);
+    // Node name + Favorite indicator + Unread indicator
+    _display->setColor(item->is_fav ? COLOR_GOLD_STAR : colTitle());
     _display->setTextSize(1);
-    drawStr(18, y + 6, item->name);
-
-    _display->setColor(COLOR_DARK_GRAY);
-    char sub[45];
-    if (item->lat != 0) {
-      snprintf(sub, sizeof(sub), "ID: !%s | Loc: %.2f, %.2f", item->id_hex, (float)item->lat / 1e6f, (float)item->lon / 1e6f);
+    char nameLine[34];
+    if (item->unread_dm > 0) {
+      snprintf(nameLine, sizeof(nameLine), "%s%.18s (%u NEW)",
+               item->is_fav ? "* " : "", item->name, item->unread_dm);
     } else {
-      snprintf(sub, sizeof(sub), "ID: !%s", item->id_hex);
+      snprintf(nameLine, sizeof(nameLine), "%s%.24s",
+               item->is_fav ? "* " : "", item->name);
+    }
+    drawStr(18, y + 6, nameLine);
+
+    _display->setColor(colSubText());
+    char sub[36];
+    if (item->lat != 0) {
+      snprintf(sub, sizeof(sub), "!%s %.2f,%.2f", item->id_hex, (float)item->lat / 1e6f, (float)item->lon / 1e6f);
+    } else {
+      const char* roleStr = (item->type == 2) ? "Repeater" : ((item->type == 3) ? "Room" : "Client");
+      snprintf(sub, sizeof(sub), "ID:!%s [%s]", item->id_hex, roleStr);
     }
     drawStr(18, y + 26, sub);
 
+    // [FAV] Toggle Button: X in 198..246, Y in y+8..y+38
+    _display->setColor(item->is_fav ? COLOR_ORANGE_BTN : colCardBg());
+    _display->fillRect(198, y + 8, 48, 30);
+    _display->setColor(item->is_fav ? COLOR_GOLD_STAR : colBorder());
+    _display->drawRect(198, y + 8, 48, 30);
+    _display->setColor(item->is_fav ? COLOR_BLACK : colText());
+    drawStr(204, y + 19, item->is_fav ? "*FAV" : "+FAV");
+
+    // [DM] Button: X in 252..304, Y in y+8..y+38
     _display->setColor(COLOR_GREEN_BTN);
-    _display->fillRect(250, y + 8, 54, 30);
-    _display->setColor(COLOR_DARK_GRAY);
-    _display->drawRect(250, y + 8, 54, 30);
+    _display->fillRect(252, y + 8, 52, 30);
+    _display->setColor(colBorder());
+    _display->drawRect(252, y + 8, 52, 30);
     _display->setColor(COLOR_WHITE);
-    drawStr(268, y + 17, "DM");
+    drawStr(270, y + 19, "DM");
 
     y += 50;
   }
 
   // Paging controls at bottom: Y in 218..238
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(8, 218, 60, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(8, 218, 60, 20);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(18, 224, "< PREV");
 
   char pageBuf[16];
   snprintf(pageBuf, sizeof(pageBuf), "Page %d / %d", _nodes_page + 1, maxPages);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colSubText());
   drawStr(130, 224, pageBuf);
 
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(252, 218, 60, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(252, 218, 60, 20);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(264, 224, "NEXT >");
 }
 
 void TapUI::handleNodesTouch(uint16_t tx, uint16_t ty) {
-  if ((tx >= 210 && tx <= 310 && ty >= 47 && ty <= 65) ||
+  if ((tx >= 210 && tx <= 312 && ty >= 47 && ty <= 66) ||
       (tx >= 40 && tx <= 280 && ty >= 155 && ty <= 191)) {
     uint8_t cmd_bytes[6];
     cmd_bytes[0] = 0x01 | 1;
@@ -1554,40 +1766,46 @@ void TapUI::handleNodesTouch(uint16_t tx, uint16_t ty) {
     return;
   }
 
+  DiscoveredNodeItem items[48];
+  int count = buildSortedContactList(items, 48);
+  int itemsPerPage = 3;
+  int maxPages = (count + itemsPerPage - 1) / itemsPerPage;
+
   if (ty >= 218 && ty <= 238) {
     if (tx >= 8 && tx <= 68 && _nodes_page > 0) {
       _nodes_page--;
       _needs_full_redraw = true;
       return;
     }
-    if (tx >= 252 && tx <= 312) {
+    if (tx >= 252 && tx <= 312 && _nodes_page + 1 < maxPages) {
       _nodes_page++;
       _needs_full_redraw = true;
       return;
     }
+    return;
   }
 
-  int total_slots = the_mesh.getTotalContactSlots();
-  int itemsPerPage = 3;
   int start = _nodes_page * itemsPerPage;
-  int validCount = 0;
+  int end = start + itemsPerPage;
+  if (end > count) end = count;
+
   int y = 70;
-
-  for (int i = 8; i < total_slots; i++) {
-    ContactInfo c;
-    if (!the_mesh.getContactByIdx(i, c)) continue;
-    if (c.type == 0) continue;
-
-    if (validCount >= start && validCount < start + itemsPerPage) {
-      if (ty >= y && ty <= y + 46) {
-        _active_contact_idx = i;
+  for (int i = start; i < end; i++) {
+    if (ty >= y && ty <= y + 46) {
+      if (tx >= 196 && tx <= 248) {
+        // Toggle favorite flag!
+        toggleContactFavorite(items[i].contact_idx);
+        return;
+      } else {
+        // Open Direct Chat with this contact
+        _active_contact_idx = items[i].contact_idx;
+        _chat_scroll_offset = 0;
         _current_tab = TAB_CHAT;
         _needs_full_redraw = true;
         return;
       }
-      y += 50;
     }
-    validCount++;
+    y += 50;
   }
 }
 
@@ -1600,23 +1818,23 @@ void TapUI::drawChansScreen() {
     return;
   }
 
-  _display->setColor(COLOR_WHITE);
+  _display->setColor(colBg());
   _display->fillRect(0, 44, 320, 196);
 
-  // Sub-tab selector: CHANNELS (8) | ROOM SERVERS (BBS)
-  _display->setColor(!_show_rooms_subview ? COLOR_NAVY : COLOR_LIGHT_GRAY);
+  // Sub-tab selector: CHANNELS (0-7) | ROOM SERVERS (BBS)
+  _display->setColor(!_show_rooms_subview ? COLOR_BLUE_KEY : colCardBg());
   _display->fillRect(8, 46, 148, 22);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(8, 46, 148, 22);
-  _display->setColor(!_show_rooms_subview ? COLOR_WHITE : COLOR_BLACK);
+  _display->setColor(!_show_rooms_subview ? COLOR_WHITE : colText());
   _display->setTextSize(1);
   drawStr(36, 53, "CHANNELS (0-7)");
 
-  _display->setColor(_show_rooms_subview ? COLOR_NAVY : COLOR_LIGHT_GRAY);
+  _display->setColor(_show_rooms_subview ? COLOR_BLUE_KEY : colCardBg());
   _display->fillRect(164, 46, 148, 22);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(164, 46, 148, 22);
-  _display->setColor(_show_rooms_subview ? COLOR_WHITE : COLOR_BLACK);
+  _display->setColor(_show_rooms_subview ? COLOR_WHITE : colText());
   drawStr(182, 53, "ROOM SERVERS (BBS)");
 
   if (!_show_rooms_subview) {
@@ -1637,17 +1855,20 @@ void TapUI::drawChansScreen() {
 
       bool isEmpty = (ch.name[0] == 0 && isChannelSecretZero(ch.channel.secret, 16) && i > 0);
       bool isActive = (_active_contact_idx == -1 && _active_channel == i);
+      int unreadCh = getChannelUnreadCount((uint8_t)i);
 
-      _display->setColor(COLOR_LIGHT_GRAY);
+      _display->setColor(colCardBg());
       _display->fillRect(8, y, 304, 44);
-      _display->setColor(isActive ? COLOR_GREEN_BTN : COLOR_MED_GRAY);
+      _display->setColor(isActive ? COLOR_GREEN_BTN : (unreadCh > 0 ? COLOR_GOLD_STAR : colBorder()));
       _display->drawRect(8, y, 304, 44);
 
-      _display->setColor(COLOR_NAVY);
+      _display->setColor(unreadCh > 0 ? COLOR_GOLD_STAR : colTitle());
       _display->setTextSize(1);
       char chTitle[34];
       if (isEmpty) {
         snprintf(chTitle, sizeof(chTitle), "Ch #%d: (Unconfigured)", i);
+      } else if (unreadCh > 0) {
+        snprintf(chTitle, sizeof(chTitle), "Ch #%d: %s (%d NEW)", i, ch.name[0] ? ch.name : "Public", unreadCh);
       } else if (ch.name[0] == '#') {
         snprintf(chTitle, sizeof(chTitle), "Ch #%d: %s", i, ch.name);
       } else {
@@ -1655,11 +1876,10 @@ void TapUI::drawChansScreen() {
       }
       drawStr(14, y + 7, chTitle);
 
-      // Show key preview / type on line 2
-      _display->setColor(COLOR_DARK_GRAY);
+      _display->setColor(colSubText());
       char keyInfo[34];
       if (isEmpty) {
-        strcpy(keyInfo, "Tap [CFG] to set #tag or PSK");
+        strcpy(keyInfo, "Tap [CONFIG] to set #tag or PSK");
       } else {
         char hexPreview[10];
         mesh::Utils::toHex(hexPreview, ch.channel.secret, 4);
@@ -1674,40 +1894,40 @@ void TapUI::drawChansScreen() {
       // [SELECT / ACTIVE] button: X in 194..252, Y in y+8..y+36
       _display->setColor(isActive ? COLOR_GREEN_BTN : COLOR_BLUE_KEY);
       _display->fillRect(194, y + 8, 58, 28);
-      _display->setColor(COLOR_DARK_GRAY);
+      _display->setColor(colBorder());
       _display->drawRect(194, y + 8, 58, 28);
       _display->setColor(COLOR_WHITE);
-      drawStr(isActive ? 205 : 205, y + 18, isActive ? "ACTIVE" : "SELECT");
+      drawStr(205, y + 18, isActive ? "ACTIVE" : "SELECT");
 
-      // [CFG] button: X in 256..306, Y in y+8..y+36
+      // [CONFIG] button: X in 256..306, Y in y+8..y+36
       _display->setColor(COLOR_PURPLE_BTN);
       _display->fillRect(256, y + 8, 50, 28);
-      _display->setColor(COLOR_DARK_GRAY);
+      _display->setColor(colBorder());
       _display->drawRect(256, y + 8, 50, 28);
       _display->setColor(COLOR_WHITE);
-      drawStr(266, y + 18, "CONFIG");
+      drawStr(264, y + 18, "CONFIG");
 
       y += 48;
     }
 
     // Paging bar at bottom: Y in 218..238
-    _display->setColor(COLOR_LIGHT_GRAY);
+    _display->setColor(colCardBg());
     _display->fillRect(8, 218, 65, 20);
-    _display->setColor(COLOR_MED_GRAY);
+    _display->setColor(colBorder());
     _display->drawRect(8, 218, 65, 20);
-    _display->setColor(COLOR_BLACK);
+    _display->setColor(colText());
     drawStr(18, 224, "< PREV");
 
     char pBuf[28];
     snprintf(pBuf, sizeof(pBuf), "Ch %d-%d (Page %d/%d)", start, end - 1, _chans_page + 1, maxPages);
-    _display->setColor(COLOR_DARK_GRAY);
+    _display->setColor(colSubText());
     drawStr(105, 224, pBuf);
 
-    _display->setColor(COLOR_LIGHT_GRAY);
+    _display->setColor(colCardBg());
     _display->fillRect(247, 218, 65, 20);
-    _display->setColor(COLOR_MED_GRAY);
+    _display->setColor(colBorder());
     _display->drawRect(247, 218, 65, 20);
-    _display->setColor(COLOR_BLACK);
+    _display->setColor(colText());
     drawStr(259, 224, "NEXT >");
   } else {
     int y = 76;
@@ -1717,17 +1937,17 @@ void TapUI::drawChansScreen() {
     for (int i = 8; i < total_slots && roomCount < 3; i++) {
       ContactInfo c;
       if (!the_mesh.getContactByIdx(i, c)) continue;
-      if (c.type == 3) { // ADV_TYPE_ROOM
-        _display->setColor(COLOR_CARD_ROOM_BG);
+      if (c.type == 3) {
+        _display->setColor(_dark_mode ? COLOR_DK_ROOM_BG : COLOR_CARD_ROOM_BG);
         _display->fillRect(10, y, 300, 38);
         _display->setColor(COLOR_CARD_ROOM_BD);
         _display->drawRect(10, y, 300, 38);
         _display->fillRect(10, y, 6, 38);
 
-        _display->setColor(COLOR_NAVY);
+        _display->setColor(colTitle());
         drawStr(22, y + 8, c.name[0] ? c.name : "BBS Room Server");
 
-        _display->setColor(COLOR_DARK_GRAY);
+        _display->setColor(colSubText());
         char idBuf[20];
         mesh::Utils::toHex(idBuf, c.id.pub_key, 4);
         char sub[32];
@@ -1745,7 +1965,7 @@ void TapUI::drawChansScreen() {
     }
 
     if (roomCount == 0) {
-      _display->setColor(COLOR_DARK_GRAY);
+      _display->setColor(colSubText());
       drawStr(15, 90, "MeshCore Room Servers are dedicated bulletin");
       drawStr(15, 106, "boards (BBS) for public asynchronous posts.");
       drawStr(15, 130, "No Room Server discovered in radio range yet.");
@@ -1759,117 +1979,101 @@ void TapUI::drawChansScreen() {
 }
 
 void TapUI::drawChannelEditor() {
-  _display->setColor(COLOR_WHITE);
+  _display->setColor(colBg());
   _display->fillRect(0, 44, 320, 196);
   _display->setTextSize(1);
 
-  // Header banner: Y in 46..68
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(COLOR_BLUE_KEY);
   _display->fillRect(8, 46, 304, 22);
   _display->setColor(COLOR_WHITE);
   char hdr[40];
   snprintf(hdr, sizeof(hdr), "CONFIGURE CHANNEL #%d", _editing_chan_idx);
   drawStr(16, 53, hdr);
 
-  // Row 1: Channel Name: Y in 72..96
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(8, 72, 222, 24);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(8, 72, 222, 24);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   char nameLine[38];
   snprintf(nameLine, sizeof(nameLine), "Name: %s", _edit_chan_draft.name[0] ? _edit_chan_draft.name : "(empty)");
   drawStr(14, 80, nameLine);
 
-  // [EDIT NAME] button: X in 234..312, Y in 72..96
   _display->setColor(COLOR_BLUE_KEY);
   _display->fillRect(234, 72, 78, 24);
   _display->setColor(COLOR_WHITE);
   drawStr(244, 80, "EDIT NAME");
 
-  // Row 2: Key / PSK display: Y in 100..136
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(8, 100, 222, 36);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(8, 100, 222, 36);
 
   unsigned char b64[50];
   memset(b64, 0, sizeof(b64));
   encode_base64(_edit_chan_draft.channel.secret, _edit_chan_key_len, b64);
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(colTitle());
   drawStr(14, 106, "PSK (Base64 / 128-bit):");
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colSubText());
   char b64Line[36];
   snprintf(b64Line, sizeof(b64Line), "%.32s", (const char*)b64);
   drawStr(14, 120, b64Line);
 
-  // [EDIT KEY] button: X in 234..312, Y in 100..136
   _display->setColor(COLOR_BLUE_KEY);
   _display->fillRect(234, 100, 78, 36);
   _display->setColor(COLOR_WHITE);
   drawStr(247, 114, "EDIT KEY");
 
-  // Row 3: Quick Key Generators: Y in 142..168
-  // [#HASHTAG KEY]: X in 8..112
   _display->setColor(COLOR_PURPLE_BTN);
   _display->fillRect(8, 142, 104, 26);
   _display->setColor(COLOR_WHITE);
   drawStr(16, 151, "#HASHTAG KEY");
 
-  // [PUBLIC PSK]: X in 116..212
   _display->setColor(COLOR_CYAN_BTN);
   _display->fillRect(116, 142, 96, 26);
   _display->setColor(COLOR_BLACK);
   drawStr(128, 151, "PUBLIC PSK");
 
-  // [RANDOM KEY]: X in 216..312
   _display->setColor(COLOR_ORANGE_BTN);
   _display->fillRect(216, 142, 96, 26);
   _display->setColor(COLOR_BLACK);
   drawStr(228, 151, "RANDOM KEY");
 
-  // Hex preview row: Y in 174..190
   char hexStr[36];
   mesh::Utils::toHex(hexStr, _edit_chan_draft.channel.secret, 16);
   char hexLine[48];
   snprintf(hexLine, sizeof(hexLine), "Hex: %.32s", hexStr);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colSubText());
   drawStr(10, 176, hexLine);
 
-  // Row 4: Bottom Actions: Y in 196..234
-  // [SAVE & USE]: X in 8..122
   _display->setColor(COLOR_GREEN_BTN);
   _display->fillRect(8, 196, 114, 36);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(8, 196, 114, 36);
   _display->setColor(COLOR_WHITE);
   drawStr(26, 210, "SAVE & USE");
 
-  // [CLEAR CH]: X in 128..220
   _display->setColor(COLOR_RED_BTN);
   _display->fillRect(128, 196, 92, 36);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(128, 196, 92, 36);
   _display->setColor(COLOR_WHITE);
   drawStr(144, 210, "CLEAR CH");
 
-  // [BACK]: X in 226..312
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(226, 196, 86, 36);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(226, 196, 86, 36);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(248, 210, "CANCEL");
 }
 
 void TapUI::handleChannelEditorTouch(uint16_t tx, uint16_t ty) {
-  // [EDIT NAME]: X in 234..312, Y in 72..96
   if (tx >= 234 && tx <= 312 && ty >= 72 && ty <= 96) {
     startKeyboardEdit(EDIT_CHAN_NAME, _edit_chan_draft.name, KB_LOWER, TAB_CHANS);
     return;
   }
 
-  // [EDIT KEY]: X in 234..312, Y in 100..136
   if (tx >= 234 && tx <= 312 && ty >= 100 && ty <= 136) {
     char hexKey[36];
     mesh::Utils::toHex(hexKey, _edit_chan_draft.channel.secret, 16);
@@ -1877,9 +2081,7 @@ void TapUI::handleChannelEditorTouch(uint16_t tx, uint16_t ty) {
     return;
   }
 
-  // Quick Key Generators: Y in 142..168
   if (ty >= 142 && ty <= 168) {
-    // [#HASHTAG KEY]: X in 8..112
     if (tx >= 8 && tx <= 112) {
       if (_edit_chan_draft.name[0] == 0) {
         snprintf(_edit_chan_draft.name, sizeof(_edit_chan_draft.name), "#chan%d", _editing_chan_idx);
@@ -1896,7 +2098,6 @@ void TapUI::handleChannelEditorTouch(uint16_t tx, uint16_t ty) {
       _needs_full_redraw = true;
       return;
     }
-    // [PUBLIC PSK]: X in 116..212
     if (tx >= 116 && tx <= 212) {
       strcpy(_edit_chan_draft.name, "Public");
       memset(_edit_chan_draft.channel.secret, 0, sizeof(_edit_chan_draft.channel.secret));
@@ -1905,7 +2106,6 @@ void TapUI::handleChannelEditorTouch(uint16_t tx, uint16_t ty) {
       _needs_full_redraw = true;
       return;
     }
-    // [RANDOM KEY]: X in 216..312
     if (tx >= 216 && tx <= 312) {
       if (_edit_chan_draft.name[0] == 0) {
         snprintf(_edit_chan_draft.name, sizeof(_edit_chan_draft.name), "Group%d", _editing_chan_idx);
@@ -1918,9 +2118,7 @@ void TapUI::handleChannelEditorTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Bottom Actions: Y in 196..234
   if (ty >= 196 && ty <= 234) {
-    // [SAVE & USE]: X in 8..122
     if (tx >= 8 && tx <= 122) {
       if (_edit_chan_draft.name[0] == 0) {
         snprintf(_edit_chan_draft.name, sizeof(_edit_chan_draft.name), "Chan%d", _editing_chan_idx);
@@ -1937,14 +2135,12 @@ void TapUI::handleChannelEditorTouch(uint16_t tx, uint16_t ty) {
       _needs_full_redraw = true;
       return;
     }
-    // [CLEAR CH]: X in 128..220
     if (tx >= 128 && tx <= 220) {
       clearChannel(_editing_chan_idx);
       _editing_chan_idx = -1;
       _needs_full_redraw = true;
       return;
     }
-    // [CANCEL]: X in 226..312
     if (tx >= 226 && tx <= 312) {
       _editing_chan_idx = -1;
       _needs_full_redraw = true;
@@ -1979,7 +2175,6 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
     int end = start + itemsPerPage;
     if (end > MAX_GROUP_CHANNELS) end = MAX_GROUP_CHANNELS;
 
-    // Paging buttons at bottom: Y in 218..238
     if (ty >= 218 && ty <= 238) {
       if (tx >= 8 && tx <= 73 && _chans_page > 0) {
         _chans_page--;
@@ -1998,7 +2193,6 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
     for (int i = start; i < end; i++) {
       if (ty >= y && ty <= y + 44) {
         if (tx >= 254 && tx <= 312) {
-          // Open Channel Config Editor for channel i
           _editing_chan_idx = i;
           memset(&_edit_chan_draft, 0, sizeof(_edit_chan_draft));
           the_mesh.getChannel(i, _edit_chan_draft);
@@ -2006,12 +2200,10 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
           _needs_full_redraw = true;
           return;
         } else {
-          // Select channel i for chat
           ChannelDetails ch;
           memset(&ch, 0, sizeof(ch));
           the_mesh.getChannel(i, ch);
           if (i > 0 && ch.name[0] == 0 && isChannelSecretZero(ch.channel.secret, 16)) {
-            // Unconfigured channel -> open config editor directly
             _editing_chan_idx = i;
             memset(&_edit_chan_draft, 0, sizeof(_edit_chan_draft));
             snprintf(_edit_chan_draft.name, sizeof(_edit_chan_draft.name), "#chan%d", i);
@@ -2023,6 +2215,7 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
           }
           _active_channel = i;
           _active_contact_idx = -1;
+          _chat_scroll_offset = 0;
           _current_tab = TAB_CHAT;
           _needs_full_redraw = true;
           return;
@@ -2031,7 +2224,6 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
       y += 48;
     }
   } else {
-    // Room servers view
     if (tx >= 40 && tx <= 280 && ty >= 160 && ty <= 196) {
       the_mesh.advert();
       _needs_full_redraw = true;
@@ -2046,6 +2238,7 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
       if (c.type == 3) {
         if (ty >= y && ty <= y + 38) {
           _active_contact_idx = i;
+          _chat_scroll_offset = 0;
           _current_tab = TAB_CHAT;
           _needs_full_redraw = true;
           return;
@@ -2058,24 +2251,23 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
 }
 
 // -------------------------------------------------------------
-// GPS SCREEN (Baud Rate Settings, Time Sync & Real-Time Diagnostics)
+// GPS SCREEN
 // -------------------------------------------------------------
 void TapUI::drawGPSScreen() {
-  _display->setColor(COLOR_WHITE);
+  _display->setColor(colBg());
   _display->fillRect(0, 44, 320, 196);
 
   LocationProvider* loc = sensors.getLocationProvider();
   bool hasLoc = (loc != nullptr && loc->isEnabled());
   bool fixValid = (hasLoc && loc->isValid());
 
-  // Status Banner: Y in 48..74
-  _display->setColor(fixValid ? COLOR_GREEN_BTN : (hasLoc ? COLOR_ORANGE_BTN : COLOR_LIGHT_GRAY));
+  _display->setColor(fixValid ? COLOR_GREEN_BTN : (hasLoc ? COLOR_ORANGE_BTN : colCardBg()));
   _display->fillRect(10, 48, 300, 26);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(10, 48, 300, 26);
 
   _display->setTextSize(1);
-  _display->setColor(fixValid ? COLOR_WHITE : (hasLoc ? COLOR_BLACK : COLOR_DARK_GRAY));
+  _display->setColor(fixValid ? COLOR_WHITE : (hasLoc ? COLOR_BLACK : colSubText()));
   if (fixValid) {
     drawStr(75, 56, "[ 3D GPS FIX ACQUIRED ]");
   } else if (hasLoc) {
@@ -2084,14 +2276,13 @@ void TapUI::drawGPSScreen() {
     drawStr(70, 56, "[ GPS RECEIVER STANDBY ]");
   }
 
-  // Telemetry Card: Y in 78..184
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(10, 78, 300, 106);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(10, 78, 300, 106);
 
   _display->setTextSize(1);
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(colTitle());
 
   char buf[70];
   long sats = (loc && loc->isEnabled()) ? loc->satellitesCount() : 0;
@@ -2106,8 +2297,8 @@ void TapUI::drawGPSScreen() {
     alt = loc->getAltitude();
   }
 
-  _display->setColor(COLOR_BLACK);
   if (fixValid) {
+    _display->setColor(colText());
     snprintf(buf, sizeof(buf), "Latitude:  %.6f deg %c", fabs(lat), lat >= 0 ? 'N' : 'S');
     drawStr(18, 98, buf);
     snprintf(buf, sizeof(buf), "Longitude: %.6f deg %c", fabs(lon), lon >= 0 ? 'E' : 'W');
@@ -2115,52 +2306,45 @@ void TapUI::drawGPSScreen() {
     snprintf(buf, sizeof(buf), "Altitude:  %ld m (%ld ft)", alt, (long)(alt * 3.28084));
     drawStr(18, 126, buf);
   } else {
-    _display->setColor(COLOR_DARK_GRAY);
+    _display->setColor(colSubText());
     drawStr(18, 98, "Latitude:  Waiting for fix...");
     drawStr(18, 112, "Longitude: Waiting for fix...");
     drawStr(18, 126, "Altitude:  Waiting for fix...");
   }
 
-  // Diagnostics row
   char diag[45];
   if (loc) loc->formatDiagnostics(diag, sizeof(diag));
   else strcpy(diag, "en:1 sat:0 fix:0");
   snprintf(buf, sizeof(buf), "Diag: %s", diag);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colMutedText());
   drawStr(18, 142, buf);
 
-  // Baud & Pin Settings row: Y in 158..178
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(colTitle());
   snprintf(buf, sizeof(buf), "Baud: %lu", _gps_baud);
   drawStr(18, 163, buf);
 
-  // [CHG BAUD] button: X in 110..185
   _display->setColor(COLOR_BLUE_KEY);
   _display->fillRect(110, 158, 75, 20);
   _display->setColor(COLOR_WHITE);
   drawStr(118, 164, "CHG BAUD");
 
-  // [PINS: RX/TX] button: X in 195..302
   _display->setColor(COLOR_CYAN_BTN);
   _display->fillRect(195, 158, 107, 20);
   _display->setColor(COLOR_BLACK);
   drawStr(202, 164, _gps_pins_swapped ? "PINS: RX16/TX15" : "PINS: RX15/TX16");
 
-  // Action Buttons: Y in 190..232
-  // [ BROADCAST LOCATION ]: X in 10..200
   _display->setColor(COLOR_BLUE_KEY);
   _display->fillRect(10, 190, 190, 38);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(10, 190, 190, 38);
   _display->setColor(COLOR_WHITE);
   drawStr(32, 204, "BROADCAST LOCATION");
 
-  // [ GPS ON/OFF ]: X in 210..310
-  _display->setColor(hasLoc ? COLOR_GREEN_BTN : COLOR_MED_GRAY);
+  _display->setColor(hasLoc ? COLOR_GREEN_BTN : colCardBg());
   _display->fillRect(210, 190, 100, 38);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(210, 190, 100, 38);
-  _display->setColor(COLOR_WHITE);
+  _display->setColor(hasLoc ? COLOR_WHITE : colText());
   drawStr(226, 204, hasLoc ? "GPS: ON" : "GPS: OFF");
 }
 
@@ -2212,23 +2396,22 @@ void TapUI::handleGPSTouch(uint16_t tx, uint16_t ty) {
 // RADIO & DEVICE SETTINGS SCREEN (2 Sub-Tabs: [RF & LORA] | [DEVICE & SYS])
 // -------------------------------------------------------------
 void TapUI::drawRadioScreen() {
-  _display->setColor(COLOR_WHITE);
+  _display->setColor(colBg());
   _display->fillRect(0, 44, 320, 196);
   _display->setTextSize(1);
 
-  // Sub-Tab Selector Bar: Y in 45..65
-  _display->setColor(_radio_subview == 0 ? COLOR_NAVY : COLOR_LIGHT_GRAY);
+  _display->setColor(_radio_subview == 0 ? COLOR_BLUE_KEY : colCardBg());
   _display->fillRect(8, 45, 148, 20);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(8, 45, 148, 20);
-  _display->setColor(_radio_subview == 0 ? COLOR_WHITE : COLOR_BLACK);
+  _display->setColor(_radio_subview == 0 ? COLOR_WHITE : colText());
   drawStr(36, 51, "[ RF & LORA ]");
 
-  _display->setColor(_radio_subview == 1 ? COLOR_NAVY : COLOR_LIGHT_GRAY);
+  _display->setColor(_radio_subview == 1 ? COLOR_BLUE_KEY : colCardBg());
   _display->fillRect(164, 45, 148, 20);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(164, 45, 148, 20);
-  _display->setColor(_radio_subview == 1 ? COLOR_WHITE : COLOR_BLACK);
+  _display->setColor(_radio_subview == 1 ? COLOR_WHITE : colText());
   drawStr(184, 51, "[ DEVICE & SYS ]");
 
   if (_radio_subview == 0) {
@@ -2240,7 +2423,7 @@ void TapUI::drawRadioScreen() {
 
 void TapUI::drawRadioRFView() {
   // 1. Node Name row: Y in 68..88
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(colTitle());
   char nameBuf[36];
   snprintf(nameBuf, sizeof(nameBuf), "Node: %.22s", the_mesh.getNodePrefs()->node_name);
   drawStr(10, 74, nameBuf);
@@ -2251,9 +2434,9 @@ void TapUI::drawRadioRFView() {
   drawStr(256, 74, "[NAME]");
 
   // 2. RF Presets Cycler: Y in 91..111
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(10, 91, 302, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(10, 91, 302, 20);
 
   _display->setColor(COLOR_BLUE_KEY);
@@ -2261,11 +2444,11 @@ void TapUI::drawRadioRFView() {
   _display->setColor(COLOR_WHITE);
   drawStr(21, 97, "<");
 
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(colTitle());
   const char* pName = (_selected_preset_idx < NUM_RF_PRESETS) ? RF_PRESETS[_selected_preset_idx].name : "Custom";
-  char pBuf[36];
+  char pBuf[38];
   snprintf(pBuf, sizeof(pBuf), "Preset: %s", pName);
-  drawStr(48, 97, pBuf);
+  drawStr(46, 97, pBuf);
 
   _display->setColor(COLOR_BLUE_KEY);
   _display->fillRect(283, 92, 28, 18);
@@ -2273,23 +2456,23 @@ void TapUI::drawRadioRFView() {
   drawStr(294, 97, ">");
 
   // 3. Frequency row: Y in 114..134
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   char freqBuf[32];
   snprintf(freqBuf, sizeof(freqBuf), "Freq: %.3f MHz", _radio_freq);
   drawStr(10, 120, freqBuf);
 
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(172, 114, 44, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(172, 114, 44, 20);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(176, 120, "-125k");
 
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(220, 114, 44, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(220, 114, 44, 20);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(224, 120, "+125k");
 
   _display->setColor(COLOR_BLUE_KEY);
@@ -2298,76 +2481,88 @@ void TapUI::drawRadioRFView() {
   drawStr(278, 120, "TYPE");
 
   // 4. SF & Bandwidth row: Y in 137..157
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   char sfbwBuf[36];
   snprintf(sfbwBuf, sizeof(sfbwBuf), "SF: %u | BW: %.1f kHz", _radio_sf, _radio_bw);
   drawStr(10, 143, sfbwBuf);
 
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(195, 137, 55, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(195, 137, 55, 20);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(204, 143, "CHG SF");
 
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(255, 137, 57, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(255, 137, 57, 20);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(264, 143, "CHG BW");
 
-  // 5. CR & TX Power row: Y in 160..180
-  _display->setColor(COLOR_BLACK);
+  // 5. CR, TX Power & Path Hash Size (1B/2B/3B) row: Y in 160..180
+  _display->setColor(colText());
   char crtxBuf[36];
-  snprintf(crtxBuf, sizeof(crtxBuf), "CR: 4/%u | TX: %d dBm", _radio_cr, _radio_tx_power);
+  snprintf(crtxBuf, sizeof(crtxBuf), "CR:4/%u TX:%ddB H:%uB", _radio_cr, _radio_tx_power, _radio_path_hash_mode + 1);
   drawStr(10, 166, crtxBuf);
 
-  _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(195, 160, 55, 20);
-  _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(195, 160, 55, 20);
-  _display->setColor(COLOR_BLACK);
-  drawStr(204, 166, "CHG CR");
+  // [CR] button: X in 164..206
+  _display->setColor(colCardBg());
+  _display->fillRect(164, 160, 42, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(164, 160, 42, 20);
+  _display->setColor(colText());
+  drawStr(178, 166, "CR");
 
-  _display->setColor(COLOR_LIGHT_GRAY);
-  _display->fillRect(255, 160, 57, 20);
-  _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(255, 160, 57, 20);
-  _display->setColor(COLOR_BLACK);
-  drawStr(264, 166, "CHG TX");
+  // [TX] button: X in 210..252
+  _display->setColor(colCardBg());
+  _display->fillRect(210, 160, 42, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(210, 160, 42, 20);
+  _display->setColor(colText());
+  drawStr(224, 166, "TX");
+
+  // [HASH: 1B/2B/3B] button: X in 256..312
+  _display->setColor(COLOR_PURPLE_BTN);
+  _display->fillRect(256, 160, 56, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(256, 160, 56, 20);
+  _display->setColor(COLOR_WHITE);
+  char hBtn[12];
+  snprintf(hBtn, sizeof(hBtn), "HASH:%uB", _radio_path_hash_mode + 1);
+  drawStr(263, 166, hBtn);
 
   // 6. Status notification row: Y in 182..194
   if (millis() < _radio_status_expiry) {
     _display->setColor(COLOR_GREEN_BTN);
     drawStr(10, 184, _radio_status_msg);
   } else {
-    _display->setColor(COLOR_DARK_GRAY);
+    _display->setColor(colSubText());
     char idHex[18];
     mesh::Utils::toHex(idHex, the_mesh.self_id.pub_key, 6);
     char idBuf[46];
-    snprintf(idBuf, sizeof(idBuf), "Node ID: !%.12s", idHex);
+    snprintf(idBuf, sizeof(idBuf), "ID:!%.12s | PathHash:%uB", idHex, _radio_path_hash_mode + 1);
     drawStr(10, 184, idBuf);
   }
 
   // 7. Action Buttons: Y in 196..234
   _display->setColor(COLOR_GREEN_BTN);
   _display->fillRect(8, 196, 108, 36);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(8, 196, 108, 36);
   _display->setColor(COLOR_WHITE);
   drawStr(18, 210, "APPLY & SAVE");
 
   _display->setColor(COLOR_BLUE_KEY);
   _display->fillRect(122, 196, 86, 36);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(122, 196, 86, 36);
   _display->setColor(COLOR_WHITE);
   drawStr(142, 210, "BEACON");
 
   _display->setColor(COLOR_RED_BTN);
   _display->fillRect(214, 196, 98, 36);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(214, 196, 98, 36);
   _display->setColor(COLOR_WHITE);
   drawStr(228, 210, "POWER OFF");
@@ -2375,7 +2570,7 @@ void TapUI::drawRadioRFView() {
 
 void TapUI::drawRadioDeviceView() {
   // Row 1: BLE Status, On/Off toggle & Unpair: Y in 68..88
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(colTitle());
   char bleBuf[28];
   if (!_ble_enabled) {
     strcpy(bleBuf, "BLE: OFF");
@@ -2386,123 +2581,121 @@ void TapUI::drawRadioDeviceView() {
   }
   drawStr(10, 74, bleBuf);
 
-  // [BLE ON/OFF]: X in 170..242
-  _display->setColor(_ble_enabled ? COLOR_GREEN_BTN : COLOR_MED_GRAY);
+  _display->setColor(_ble_enabled ? COLOR_GREEN_BTN : colCardBg());
   _display->fillRect(170, 68, 72, 20);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(170, 68, 72, 20);
-  _display->setColor(COLOR_WHITE);
+  _display->setColor(_ble_enabled ? COLOR_WHITE : colText());
   drawStr(180, 74, _ble_enabled ? "BLE: ON" : "BLE: OFF");
 
-  // [UNPAIR]: X in 248..312
   _display->setColor(COLOR_ORANGE_BTN);
   _display->fillRect(248, 68, 64, 20);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(248, 68, 64, 20);
   _display->setColor(COLOR_BLACK);
   drawStr(258, 74, "UNPAIR");
 
   // Row 2: BLE PIN Config: Y in 91..111
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   char pinBuf[32];
   snprintf(pinBuf, sizeof(pinBuf), "BLE PIN: %06lu", (unsigned long)the_mesh.getBLEPin());
   drawStr(10, 97, pinBuf);
 
-  // [EDIT PIN]: X in 170..242
   _display->setColor(COLOR_BLUE_KEY);
   _display->fillRect(170, 91, 72, 20);
   _display->setColor(COLOR_WHITE);
   drawStr(180, 97, "EDIT PIN");
 
-  // [RAND PIN]: X in 248..312
   _display->setColor(COLOR_PURPLE_BTN);
   _display->fillRect(248, 91, 64, 20);
   _display->setColor(COLOR_WHITE);
   drawStr(256, 97, "RANDOM");
 
-  // Row 3: Screen Brightness & Sleep Timeout: Y in 114..134
-  _display->setColor(COLOR_BLACK);
-  char brtBuf[24];
-  snprintf(brtBuf, sizeof(brtBuf), "Bright: %u%%", _brightness_pct);
+  // Row 3: Screen Brightness, Sleep Timeout & Dark/Light Theme: Y in 114..134
+  _display->setColor(colText());
+  char brtBuf[18];
+  snprintf(brtBuf, sizeof(brtBuf), "Brt:%u%%", _brightness_pct);
   drawStr(10, 120, brtBuf);
 
-  // [BRT]: X in 98..148
+  // [+BRT]: X in 68..112
   _display->setColor(COLOR_CYAN_BTN);
-  _display->fillRect(98, 114, 50, 20);
-  _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(98, 114, 50, 20);
+  _display->fillRect(68, 114, 44, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(68, 114, 44, 20);
   _display->setColor(COLOR_BLACK);
-  drawStr(106, 120, "+BRT");
+  drawStr(76, 120, "+BRT");
 
-  // Sleep label + button: X in 158..312
+  // [SLEEP]: X in 118..224
   int sIdx = 1;
   for (int i = 0; i < NUM_SLEEP_OPTIONS; i++) {
     if (SLEEP_TIMEOUTS[i] == _screen_sleep_seconds) { sIdx = i; break; }
   }
-  char slpBuf[24];
+  _display->setColor(colCardBg());
+  _display->fillRect(118, 114, 106, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(118, 114, 106, 20);
+  _display->setColor(colText());
+  char slpBuf[22];
   snprintf(slpBuf, sizeof(slpBuf), "Sleep: %s", SLEEP_LABELS[sIdx]);
-  drawStr(156, 120, slpBuf);
+  drawStr(128, 120, slpBuf);
 
-  _display->setColor(COLOR_CYAN_BTN);
-  _display->fillRect(248, 114, 64, 20);
-  _display->setColor(COLOR_MED_GRAY);
-  _display->drawRect(248, 114, 64, 20);
-  _display->setColor(COLOR_BLACK);
-  drawStr(262, 120, "SLEEP");
+  // [THEME: DARK/LIGHT]: X in 230..312
+  _display->setColor(_dark_mode ? COLOR_PURPLE_BTN : COLOR_ORANGE_BTN);
+  _display->fillRect(230, 114, 82, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(230, 114, 82, 20);
+  _display->setColor(_dark_mode ? COLOR_WHITE : COLOR_BLACK);
+  drawStr(240, 120, _dark_mode ? "THEME:DARK" : "THEME:LITE");
 
   // Row 4: Clock Display & Nudge: Y in 137..157
   char dtBuf[32];
   formatLocalDateTime(dtBuf, sizeof(dtBuf), true, false);
-  _display->setColor(COLOR_NAVY);
+  _display->setColor(colTitle());
   char clkLine[38];
   snprintf(clkLine, sizeof(clkLine), "UTC: %s", dtBuf);
   drawStr(10, 143, clkLine);
 
-  // [-1h] / [+1h]: X in 236..272, 276..312
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(236, 137, 36, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(236, 137, 36, 20);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(243, 143, "-1h");
 
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(276, 137, 36, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(276, 137, 36, 20);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(283, 143, "+1h");
 
   // Row 5: Clock Sync & Manual Set: Y in 160..180
-  // [GPS SYNC]: X in 10..112
   _display->setColor(COLOR_GREEN_BTN);
   _display->fillRect(10, 160, 102, 20);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(10, 160, 102, 20);
   _display->setColor(COLOR_WHITE);
   drawStr(24, 166, "GPS TIME SYNC");
 
-  // [SET CLOCK]: X in 118..220
   _display->setColor(COLOR_BLUE_KEY);
   _display->fillRect(118, 160, 102, 20);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(118, 160, 102, 20);
   _display->setColor(COLOR_WHITE);
   drawStr(136, 166, "SET CLOCK");
 
-  // [-1m] / [+1m]: X in 226..266, 270..312
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(226, 160, 40, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(226, 160, 40, 20);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(235, 166, "-1m");
 
-  _display->setColor(COLOR_LIGHT_GRAY);
+  _display->setColor(colCardBg());
   _display->fillRect(270, 160, 42, 20);
-  _display->setColor(COLOR_MED_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(270, 160, 42, 20);
-  _display->setColor(COLOR_BLACK);
+  _display->setColor(colText());
   drawStr(280, 166, "+1m");
 
   // Row 6: Status / Feedback line: Y in 183..194
@@ -2510,38 +2703,34 @@ void TapUI::drawRadioDeviceView() {
     _display->setColor(COLOR_GREEN_BTN);
     drawStr(10, 184, _radio_status_msg);
   } else {
-    _display->setColor(COLOR_DARK_GRAY);
-    drawStr(10, 184, "Tip: All settings also available via Serial/BLE CLI");
+    _display->setColor(colSubText());
+    drawStr(10, 184, "Tip: Dark theme saves battery power");
   }
 
   // Row 7: System Action Buttons: Y in 196..234
-  // [SAVE SETTINGS]: X in 8..116
   _display->setColor(COLOR_GREEN_BTN);
   _display->fillRect(8, 196, 108, 36);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(8, 196, 108, 36);
   _display->setColor(COLOR_WHITE);
   drawStr(18, 210, "SAVE CONFIG");
 
-  // [REBOOT]: X in 122..208
   _display->setColor(COLOR_ORANGE_BTN);
   _display->fillRect(122, 196, 86, 36);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(122, 196, 86, 36);
   _display->setColor(COLOR_BLACK);
   drawStr(144, 210, "REBOOT");
 
-  // [POWER OFF]: X in 214..312
   _display->setColor(COLOR_RED_BTN);
   _display->fillRect(214, 196, 98, 36);
-  _display->setColor(COLOR_DARK_GRAY);
+  _display->setColor(colBorder());
   _display->drawRect(214, 196, 98, 36);
   _display->setColor(COLOR_WHITE);
   drawStr(228, 210, "POWER OFF");
 }
 
 void TapUI::handleRadioTouch(uint16_t tx, uint16_t ty) {
-  // Sub-Tab Selector Bar: Y in 45..65
   if (ty >= 45 && ty <= 65) {
     if (tx >= 8 && tx <= 156) {
       _radio_subview = 0;
@@ -2563,13 +2752,11 @@ void TapUI::handleRadioTouch(uint16_t tx, uint16_t ty) {
 }
 
 void TapUI::handleRadioRFTouch(uint16_t tx, uint16_t ty) {
-  // [EDIT NAME]: X in 242..312, Y in 68..88
   if (tx >= 242 && tx <= 312 && ty >= 68 && ty <= 88) {
     startKeyboardEdit(EDIT_NODE_NAME, the_mesh.getNodePrefs()->node_name, KB_LOWER, TAB_RADIO);
     return;
   }
 
-  // Preset Prev/Next: Y in 91..111
   if (ty >= 91 && ty <= 111) {
     if (tx >= 10 && tx <= 50) {
       int p = _selected_preset_idx - 1;
@@ -2588,23 +2775,22 @@ void TapUI::handleRadioRFTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Freq Steppers & Type: Y in 114..134
   if (ty >= 114 && ty <= 134) {
-    if (tx >= 172 && tx <= 216) { // -125k
+    if (tx >= 172 && tx <= 216) {
       _radio_freq -= 0.125f;
       if (_radio_freq < 150.0f) _radio_freq = 150.0f;
       _selected_preset_idx = NUM_RF_PRESETS - 1;
       _needs_full_redraw = true;
       return;
     }
-    if (tx >= 220 && tx <= 264) { // +125k
+    if (tx >= 220 && tx <= 264) {
       _radio_freq += 0.125f;
       if (_radio_freq > 960.0f) _radio_freq = 960.0f;
       _selected_preset_idx = NUM_RF_PRESETS - 1;
       _needs_full_redraw = true;
       return;
     }
-    if (tx >= 268 && tx <= 312) { // TYPE exact freq
+    if (tx >= 268 && tx <= 312) {
       char fStr[16];
       snprintf(fStr, sizeof(fStr), "%.3f", _radio_freq);
       startKeyboardEdit(EDIT_RADIO_FREQ, fStr, KB_SYMBOLS, TAB_RADIO);
@@ -2612,16 +2798,15 @@ void TapUI::handleRadioRFTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // SF & BW toggles: Y in 137..157
   if (ty >= 137 && ty <= 157) {
-    if (tx >= 195 && tx <= 250) { // CHG SF
+    if (tx >= 195 && tx <= 250) {
       _radio_sf++;
       if (_radio_sf > 12) _radio_sf = 7;
       _selected_preset_idx = NUM_RF_PRESETS - 1;
       _needs_full_redraw = true;
       return;
     }
-    if (tx >= 255 && tx <= 312) { // CHG BW
+    if (tx >= 255 && tx <= 312) {
       if (_radio_bw >= 500.0f) _radio_bw = 62.5f;
       else if (_radio_bw < 100.0f) _radio_bw = 125.0f;
       else if (_radio_bw < 200.0f) _radio_bw = 250.0f;
@@ -2632,16 +2817,16 @@ void TapUI::handleRadioRFTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // CR & TX toggles: Y in 160..180
+  // CR, TX & Path Hash Size (1B/2B/3B) toggles: Y in 160..180
   if (ty >= 160 && ty <= 180) {
-    if (tx >= 195 && tx <= 250) { // CHG CR
+    if (tx >= 164 && tx <= 206) { // CR
       _radio_cr++;
       if (_radio_cr > 8) _radio_cr = 5;
       _selected_preset_idx = NUM_RF_PRESETS - 1;
       _needs_full_redraw = true;
       return;
     }
-    if (tx >= 255 && tx <= 312) { // CHG TX
+    if (tx >= 210 && tx <= 252) { // TX
       static const int8_t tx_steps[] = { 10, 14, 17, 20, 22 };
       int nextIdx = 0;
       for (int i = 0; i < 5; i++) {
@@ -2654,9 +2839,19 @@ void TapUI::handleRadioRFTouch(uint16_t tx, uint16_t ty) {
       _needs_full_redraw = true;
       return;
     }
+    if (tx >= 256 && tx <= 312) { // HASH: 1B -> 2B -> 3B
+      _radio_path_hash_mode = (_radio_path_hash_mode + 1) % 3;
+      NodePrefs* prefs = the_mesh.getNodePrefs();
+      if (prefs) {
+        prefs->path_hash_mode = _radio_path_hash_mode;
+      }
+      char msg[32];
+      snprintf(msg, sizeof(msg), "Path Hash set to %uB (Tap APPLY)", _radio_path_hash_mode + 1);
+      showStatusNotification(msg);
+      return;
+    }
   }
 
-  // Bottom Action Buttons: Y in 196..234
   if (ty >= 196 && ty <= 234) {
     if (tx >= 8 && tx <= 116) {
       applyAndSaveRadioParams();
@@ -2675,7 +2870,6 @@ void TapUI::handleRadioRFTouch(uint16_t tx, uint16_t ty) {
 }
 
 void TapUI::handleRadioDeviceTouch(uint16_t tx, uint16_t ty) {
-  // Row 1: BLE ON/OFF & UNPAIR: Y in 68..88
   if (ty >= 68 && ty <= 88) {
     if (tx >= 170 && tx <= 242) {
       setBLEEnabled(!_ble_enabled, true);
@@ -2688,7 +2882,6 @@ void TapUI::handleRadioDeviceTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Row 2: BLE PIN Edit & Random: Y in 91..111
   if (ty >= 91 && ty <= 111) {
     if (tx >= 170 && tx <= 242) {
       char pinStr[12];
@@ -2706,9 +2899,9 @@ void TapUI::handleRadioDeviceTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Row 3: Brightness & Sleep Timeout: Y in 114..134
+  // Row 3: Brightness, Sleep Timeout, Dark/Light Theme: Y in 114..134
   if (ty >= 114 && ty <= 134) {
-    if (tx >= 90 && tx <= 152) {
+    if (tx >= 64 && tx <= 114) {
       int nextIdx = 0;
       for (int i = 0; i < NUM_BRIGHTNESS_STEPS; i++) {
         if (BRIGHTNESS_STEPS[i] >= _brightness_pct) {
@@ -2719,7 +2912,7 @@ void TapUI::handleRadioDeviceTouch(uint16_t tx, uint16_t ty) {
       setBrightnessPct(BRIGHTNESS_STEPS[nextIdx], true);
       return;
     }
-    if (tx >= 244 && tx <= 312) {
+    if (tx >= 118 && tx <= 224) {
       int sIdx = 1;
       for (int i = 0; i < NUM_SLEEP_OPTIONS; i++) {
         if (SLEEP_TIMEOUTS[i] == _screen_sleep_seconds) {
@@ -2730,9 +2923,13 @@ void TapUI::handleRadioDeviceTouch(uint16_t tx, uint16_t ty) {
       setScreenSleepSeconds(SLEEP_TIMEOUTS[sIdx], true);
       return;
     }
+    if (tx >= 230 && tx <= 312) {
+      setDarkMode(!_dark_mode, true);
+      showStatusNotification(_dark_mode ? "Dark Theme Enabled" : "Light Theme Enabled");
+      return;
+    }
   }
 
-  // Row 4: Clock -1h / +1h: Y in 137..157
   if (ty >= 137 && ty <= 157) {
     if (tx >= 236 && tx <= 272) {
       adjustClockSeconds(-3600);
@@ -2746,7 +2943,6 @@ void TapUI::handleRadioDeviceTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Row 5: Clock GPS Sync, Set Clock, -1m, +1m: Y in 160..180
   if (ty >= 160 && ty <= 180) {
     if (tx >= 10 && tx <= 112) {
       if (syncClockFromGPS()) {
@@ -2774,7 +2970,6 @@ void TapUI::handleRadioDeviceTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Row 7: Bottom System Actions: Y in 196..234
   if (ty >= 196 && ty <= 234) {
     if (tx >= 8 && tx <= 116) {
       the_mesh.savePrefs();
