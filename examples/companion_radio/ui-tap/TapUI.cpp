@@ -3,6 +3,9 @@
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/sensors/LocationProvider.h>
+#include "UITask.h"
+
+extern UITask ui_task;
 
 #define COLOR_NAVY       0x1994
 #define COLOR_WHITE      0xFFFF
@@ -432,9 +435,19 @@ void TapUI::drawStatusBar() {
   }
   drawStr(4, 5, recBuf);
 
-  // Center: [MESH ON] and GPS status
-  _display->setColor(COLOR_GREEN_BTN);
-  drawStr(110, 5, "[MESH ON]");
+  // Center: BLE status (shows pairing PIN while no phone is connected)
+  if (ui_task.hasConnection()) {
+    _display->setColor(COLOR_GREEN_BTN);
+    drawStr(110, 5, "[BT CONN]");
+  } else if (the_mesh.getBLEPin() != 0) {
+    char pinBuf[16];
+    snprintf(pinBuf, sizeof(pinBuf), "PIN:%06lu", (unsigned long)the_mesh.getBLEPin());
+    _display->setColor(COLOR_ORANGE_BTN);
+    drawStr(105, 5, pinBuf);
+  } else {
+    _display->setColor(COLOR_GREEN_BTN);
+    drawStr(110, 5, "[MESH ON]");
+  }
 
   LocationProvider* loc = sensors.getLocationProvider();
   if (loc && loc->isEnabled()) {
@@ -1441,7 +1454,7 @@ void TapUI::drawRadioScreen() {
     char idHex[20];
     mesh::Utils::toHex(idHex, the_mesh.self_id.pub_key, 6);
     char idBuf[40];
-    snprintf(idBuf, sizeof(idBuf), "Pubkey: !%s...", idHex);
+    snprintf(idBuf, sizeof(idBuf), "BLE PIN: %06lu  ID: !%.8s", (unsigned long)the_mesh.getBLEPin(), idHex);
     drawStr(10, 170, idBuf);
   }
 
