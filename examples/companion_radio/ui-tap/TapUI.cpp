@@ -2565,7 +2565,172 @@ void TapUI::drawGPSStatusView() {
   drawStr(248, 206, hasLoc ? "GPS: ON" : "GPS: OFF");
 }
 
+void TapUI::drawLine(int x0, int y0, int x1, int y1, int thickness) {
+  if (!_display) return;
+  int dx = abs(x1 - x0);
+  int sx = (x0 < x1) ? 1 : -1;
+  int dy = -abs(y1 - y0);
+  int sy = (y0 < y1) ? 1 : -1;
+  int err = dx + dy;
+  int off = (thickness > 1) ? -(thickness / 2) : 0;
+
+  while (true) {
+    _display->fillRect(x0 + off, y0 + off, thickness, thickness);
+    if (x0 == x1 && y0 == y1) break;
+    int e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      x0 += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y0 += sy;
+    }
+  }
+}
+
+void TapUI::drawCircleOutline(int cx, int cy, int r) {
+  if (!_display || r <= 0) return;
+  int x = 0;
+  int y = r;
+  int d = 3 - 2 * r;
+  while (y >= x) {
+    _display->fillRect(cx + x, cy + y, 1, 1);
+    _display->fillRect(cx - x, cy + y, 1, 1);
+    _display->fillRect(cx + x, cy - y, 1, 1);
+    _display->fillRect(cx - x, cy - y, 1, 1);
+    _display->fillRect(cx + y, cy + x, 1, 1);
+    _display->fillRect(cx - y, cy + x, 1, 1);
+    _display->fillRect(cx + y, cy - x, 1, 1);
+    _display->fillRect(cx - y, cy - x, 1, 1);
+    x++;
+    if (d > 0) {
+      y--;
+      d = d + 4 * (x - y) + 10;
+    } else {
+      d = d + 4 * x + 6;
+    }
+  }
+}
+
+void TapUI::drawCompassPointer(int cx, int cy, float angle_deg, int r_tip, int r_tail, int half_w, uint16_t color) {
+  if (!_display) return;
+  float rad = angle_deg * 0.0174532925f;
+  float sinA = sinf(rad);
+  float cosA = cosf(rad);
+
+  int tipX = cx + (int)roundf((float)r_tip * sinA);
+  int tipY = cy - (int)roundf((float)r_tip * cosA);
+  int tailX = cx - (int)roundf((float)r_tail * sinA);
+  int tailY = cy + (int)roundf((float)r_tail * cosA);
+
+  int wingDist = r_tip - 9;
+  if (wingDist < 4) wingDist = 4;
+  int wingBaseX = cx + (int)roundf((float)wingDist * sinA);
+  int wingBaseY = cy - (int)roundf((float)wingDist * cosA);
+
+  int leftX = wingBaseX - (int)roundf((float)half_w * cosA);
+  int leftY = wingBaseY - (int)roundf((float)half_w * sinA);
+  int rightX = wingBaseX + (int)roundf((float)half_w * cosA);
+  int rightY = wingBaseY + (int)roundf((float)half_w * sinA);
+
+  _display->setColor(color);
+  // Shaft from tail to tip
+  drawLine(tailX, tailY, tipX, tipY, 2);
+  // Filled arrowhead (fan from left wing to right wing to tip)
+  drawLine(leftX, leftY, tipX, tipY, 2);
+  drawLine(rightX, rightY, tipX, tipY, 2);
+  drawLine(leftX, leftY, rightX, rightY, 2);
+  int midLeftX = (leftX + wingBaseX) / 2;
+  int midLeftY = (leftY + wingBaseY) / 2;
+  int midRightX = (rightX + wingBaseX) / 2;
+  int midRightY = (rightY + wingBaseY) / 2;
+  drawLine(midLeftX, midLeftY, tipX, tipY, 2);
+  drawLine(midRightX, midRightY, tipX, tipY, 2);
+}
+
 void TapUI::drawGPSNavView() {
+  // ---------------------------------------------------------
+  // 1. Top Node Selector Bar (Y = 67..87)
+  // ---------------------------------------------------------
+  _display->setColor(colCardBg());
+  _display->fillRect(8, 67, 304, 20);
+  _display->setColor(colBorder());
+  _display->drawRect(8, 67, 304, 20);
+
+  DiscoveredNodeItem items[48];
+  int count = buildSortedContactList(items, 48);
+
+  if (count > 0) {
+    if (_gps_nav_target_slot < 0 && _active_contact_idx >= 0) {
+      _gps_nav_target_slot = _active_contact_idx;
+    }
+    int selIdx = 0;
+    for (int i = 0; i < count; i++) {
+      if (items[i].contact_idx == _gps_nav_target_slot) {
+        selIdx = i;
+        break;
+      }
+    }
+    _gps_nav_target_slot = items[selIdx].contact_idx;
+    DiscoveredNodeItem* target = &items[selIdx];
+
+    _display->setColor(COLOR_BLUE_KEY);
+    _display->fillRect(9, 68, 48, 18);
+    _display->setColor(COLOR_WHITE);
+    drawStr(14, 73, "< NODE");
+
+    char targetHdr[32];
+    snprintf(targetHdr, sizeof(targetHdr), "%s%.15s (%d/%d)",
+             target->is_fav ? "*" : "", target->name, selIdx + 1, count);
+    _display->setColor(target->is_fav ? COLOR_GOLD_STAR : colTitle());
+    drawStr(64, 73, targetHdr);
+
+    _display->setColor(COLOR_BLUE_KEY);
+    _display->fillRect(263, 68, 48, 18);
+    _display->setColor(COLOR_WHITE);
+    drawStr(268, 73, "NODE >");
+  } else {
+    _display->setColor(colSubText());
+    drawStr(18, 73, "Target Node: None discovered yet");
+  }
+
+  // ---------------------------------------------------------
+  // 2. Main Compass & Navigation Card Frame (Y = 90..204)
+  // ---------------------------------------------------------
+  _display->setColor(colCardBg());
+  _display->fillRect(8, 90, 304, 114);
+  _display->setColor(colBorder());
+  _display->drawRect(8, 90, 304, 114);
+
+  drawGPSNavInterior();
+
+  // ---------------------------------------------------------
+  // 3. Bottom Action Buttons (Y = 207..231)
+  // ---------------------------------------------------------
+  _display->setColor(COLOR_BLUE_KEY);
+  _display->fillRect(8, 207, 102, 24);
+  _display->setColor(colBorder());
+  _display->drawRect(8, 207, 102, 24);
+  _display->setColor(COLOR_WHITE);
+  drawStr(16, 215, "REQ NODE LOC");
+
+  _display->setColor(COLOR_GREEN_BTN);
+  _display->fillRect(114, 207, 102, 24);
+  _display->setColor(colBorder());
+  _display->drawRect(114, 207, 102, 24);
+  _display->setColor(COLOR_WHITE);
+  drawStr(124, 215, "SEND MY LOC");
+
+  _display->setColor(COLOR_PURPLE_BTN);
+  _display->fillRect(220, 207, 92, 24);
+  _display->setColor(colBorder());
+  _display->drawRect(220, 207, 92, 24);
+  _display->setColor(COLOR_WHITE);
+  drawStr(242, 215, "DM NODE");
+}
+
+void TapUI::drawGPSNavInterior() {
   LocationProvider* loc = sensors.getLocationProvider();
   bool hasLoc = (loc != nullptr && loc->isEnabled());
   bool fixValid = (hasLoc && loc->isValid());
@@ -2582,117 +2747,140 @@ void TapUI::drawGPSNavView() {
     myHasPos = true;
   }
 
-  // ---------------------------------------------------------
-  // Card 1 (Y = 68..126): Current Heading & Speed
-  // ---------------------------------------------------------
-  _display->setColor(colCardBg());
-  _display->fillRect(8, 68, 304, 58);
-  _display->setColor(colBorder());
-  _display->drawRect(8, 68, 304, 58);
-
-  _display->setTextSize(1);
-  _display->setColor(colTitle());
-  drawStr(14, 73, "CURRENT HEADING & SPEED");
-
-  // Unit toggle button [KM/H] / [MPH] at top-right of Card 1: X=234..306, Y=71..89
-  _display->setColor(COLOR_CYAN_BTN);
-  _display->fillRect(234, 71, 72, 18);
-  _display->setColor(COLOR_BLACK);
-  drawStr(242, 76, _gps_metric_units ? "UNIT:KM/H" : "UNIT:MPH");
-
-  // Big Heading & Speed readout (TextSize 2 at Y = 88)
-  _display->setTextSize(2);
-  char hdgBig[16];
-  if (tap_gps.hasCourse()) {
-    float crs = tap_gps.getCourseDeg();
-    snprintf(hdgBig, sizeof(hdgBig), "%03d %s", (int)(crs + 0.5f) % 360, degToCardinal(crs));
-    _display->setColor(COLOR_GREEN_BTN);
-  } else {
-    strcpy(hdgBig, "--- --");
-    _display->setColor(colSubText());
-  }
-  drawStr(14, 88, hdgBig);
-
-  char spdBig[16];
-  if (_gps_metric_units) {
-    snprintf(spdBig, sizeof(spdBig), "%.1fkm/h", tap_gps.getSpeedKmh());
-  } else {
-    snprintf(spdBig, sizeof(spdBig), "%.1fmph", tap_gps.getSpeedMph());
-  }
-  _display->setColor(COLOR_GOLD_STAR);
-  drawStr(122, 88, spdBig);
-
-  _display->setTextSize(1);
-  _display->setColor(colSubText());
-  char myLine[54];
-  if (myHasPos) {
-    snprintf(myLine, sizeof(myLine), "%.1f kts | Me: %.5f, %.5f (%s)",
-             tap_gps.getSpeedKnots(), myLat, myLon, fixValid ? "3D Fix" : "Saved");
-  } else {
-    snprintf(myLine, sizeof(myLine), "%.1f kts | Waiting for GPS fix...", tap_gps.getSpeedKnots());
-  }
-  drawStr(14, 111, myLine);
-
-  // ---------------------------------------------------------
-  // Card 2 (Y = 130..234): Distance & Heading to Selected Node
-  // ---------------------------------------------------------
-  _display->setColor(colCardBg());
-  _display->fillRect(8, 130, 304, 104);
-  _display->setColor(colBorder());
-  _display->drawRect(8, 130, 304, 104);
-
   DiscoveredNodeItem items[48];
   int count = buildSortedContactList(items, 48);
-
-  if (count == 0) {
-    _display->setColor(colSubText());
-    drawStr(20, 152, "No contacts discovered yet.");
-    drawStr(20, 170, "Discover nodes on the NODES tab to measure");
-    drawStr(20, 186, "distance and heading to another node.");
-    return;
-  }
-
-  // Resolve currently selected contact in sorted list
-  if (_gps_nav_target_slot < 0 && _active_contact_idx >= 0) {
-    _gps_nav_target_slot = _active_contact_idx;
-  }
-  int selIdx = 0;
-  for (int i = 0; i < count; i++) {
-    if (items[i].contact_idx == _gps_nav_target_slot) {
-      selIdx = i;
-      break;
+  DiscoveredNodeItem* target = nullptr;
+  if (count > 0) {
+    int selIdx = 0;
+    for (int i = 0; i < count; i++) {
+      if (items[i].contact_idx == _gps_nav_target_slot) {
+        selIdx = i;
+        break;
+      }
     }
+    target = &items[selIdx];
   }
-  _gps_nav_target_slot = items[selIdx].contact_idx;
-  DiscoveredNodeItem* target = &items[selIdx];
-
-  // Contact Selector Row: [< PREV] (X=12..64, Y=133..153) | Target Name | [NEXT >] (X=256..308, Y=133..153)
-  _display->setColor(COLOR_BLUE_KEY);
-  _display->fillRect(12, 133, 52, 20);
-  _display->setColor(COLOR_WHITE);
-  drawStr(18, 139, "< NODE");
-
-  char targetHdr[32];
-  snprintf(targetHdr, sizeof(targetHdr), "%s%.15s (%d/%d)",
-           target->is_fav ? "*" : "", target->name, selIdx + 1, count);
-  _display->setColor(target->is_fav ? COLOR_GOLD_STAR : colTitle());
-  drawStr(70, 139, targetHdr);
-
-  _display->setColor(COLOR_BLUE_KEY);
-  _display->fillRect(256, 133, 52, 20);
-  _display->setColor(COLOR_WHITE);
-  drawStr(262, 139, "NODE >");
-
-  bool targetHasPos = (target->lat != 0 || target->lon != 0);
+  bool targetHasPos = (target != nullptr && (target->lat != 0 || target->lon != 0));
+  double brg = 0.0;
+  double dist_m = 0.0;
   if (myHasPos && targetHasPos) {
     double tLat = (double)target->lat / 1e6;
     double tLon = (double)target->lon / 1e6;
-    double dist_m = calcDistanceMeters(myLat, myLon, tLat, tLon);
-    double brg = calcBearingDegrees(myLat, myLon, tLat, tLon);
+    dist_m = calcDistanceMeters(myLat, myLon, tLat, tLon);
+    brg = calcBearingDegrees(myLat, myLon, tLat, tLon);
+  }
+
+  // Clear interior of the Compass & Navigation Card
+  _display->setColor(colCardBg());
+  _display->fillRect(9, 91, 302, 112);
+
+  // ---------------------------------------------------------
+  // Left Side: Graphical Compass Rose (Center X=62, Y=147, R=40)
+  // ---------------------------------------------------------
+  const int cx = 62;
+  const int cy = 147;
+  const int r = 39;
+
+  // Outer dial ring + inner crosshair ring
+  _display->setColor(colBorder());
+  drawCircleOutline(cx, cy, r);
+  drawCircleOutline(cx, cy, r - 1);
+
+  // Tick marks every 45 degrees (N, NE, E, SE, S, SW, W, NW)
+  for (int a = 0; a < 360; a += 45) {
+    float rad = (float)a * 0.0174532925f;
+    int r_in = (a % 90 == 0) ? (r - 6) : (r - 4);
+    int x0 = cx + (int)roundf((float)r_in * sinf(rad));
+    int y0 = cy - (int)roundf((float)r_in * cosf(rad));
+    int x1 = cx + (int)roundf((float)r * sinf(rad));
+    int y1 = cy - (int)roundf((float)r * cosf(rad));
+    _display->setColor((a == 0) ? COLOR_RED_BTN : colMutedText());
+    drawLine(x0, y0, x1, y1, 1);
+  }
+
+  // Cardinal Labels (N, E, S, W) around the compass dial
+  _display->setTextSize(1);
+  _display->setColor(COLOR_RED_BTN);
+  drawStr(cx - 2, cy - r - 8, "N");
+  _display->setColor(colSubText());
+  drawStr(cx - 2, cy + r + 2, "S");
+  drawStr(cx + r + 3, cy - 3, "E");
+  drawStr(cx - r - 7, cy - 3, "W");
+
+  // Subtle center crosshair
+  _display->setColor(colBorder());
+  _display->fillRect(cx - 4, cy, 9, 1);
+  _display->fillRect(cx, cy - 4, 1, 9);
+
+  // 1) Draw Target Node Bearing Pointer (GOLD arrow)
+  if (myHasPos && targetHasPos) {
+    drawCompassPointer(cx, cy, (float)brg, r - 6, 8, 5, COLOR_GOLD_STAR);
+  }
+
+  // 2) Draw Our GPS Heading Pointer (GREEN arrow)
+  if (tap_gps.hasCourse()) {
+    drawCompassPointer(cx, cy, tap_gps.getCourseDeg(), r - 9, 10, 4, COLOR_GREEN_BTN);
+  }
+
+  // Center hub dot
+  _display->setColor(COLOR_WHITE);
+  _display->fillRect(cx - 2, cy - 2, 5, 5);
+
+  // Vertical divider between Compass and Telemetry Readouts
+  _display->setColor(colBorder());
+  _display->fillRect(114, 94, 1, 106);
+
+  // ---------------------------------------------------------
+  // Right Side (X = 120..308): All Telemetry & Node Info
+  // ---------------------------------------------------------
+  // Unit toggle button [KM/H] / [MPH] at top-right: X=248..306, Y=93..109
+  _display->setColor(COLOR_CYAN_BTN);
+  _display->fillRect(248, 93, 58, 16);
+  _display->setColor(COLOR_BLACK);
+  drawStr(254, 97, _gps_metric_units ? "KM/H" : "MPH");
+
+  // Row 1 (Y = 96): Our GPS Speed & Heading (Green indicator matches Green Needle)
+  _display->setColor(COLOR_GREEN_BTN);
+  _display->fillRect(120, 97, 5, 5);
+  char spdLine[32];
+  if (_gps_metric_units) {
+    snprintf(spdLine, sizeof(spdLine), "SPD: %.1f km/h", tap_gps.getSpeedKmh());
+  } else {
+    snprintf(spdLine, sizeof(spdLine), "SPD: %.1f mph", tap_gps.getSpeedMph());
+  }
+  drawStr(128, 96, spdLine);
+
+  // Row 2 (Y = 110): Our GPS Course / Heading
+  char hdgLine[36];
+  if (tap_gps.hasCourse()) {
+    float crs = tap_gps.getCourseDeg();
+    snprintf(hdgLine, sizeof(hdgLine), "HDG: %03d deg (%s)",
+             (int)(crs + 0.5f) % 360, degToCardinal(crs));
+    _display->setColor(COLOR_GREEN_BTN);
+  } else {
+    snprintf(hdgLine, sizeof(hdgLine), "HDG: --- (%.1f kts)", tap_gps.getSpeedKnots());
+    _display->setColor(colSubText());
+  }
+  drawStr(120, 110, hdgLine);
+
+  // Horizontal separator
+  _display->setColor(colBorder());
+  _display->fillRect(120, 122, 186, 1);
+
+  // Row 3..5: Target Node Bearing, Relative Turn, Distance & Coordinates
+  if (myHasPos && targetHasPos) {
     const char* card = degToCardinal((float)brg);
 
-    // Distance line (Y = 158)
-    char distLine[50];
+    // Gold indicator matches Gold Target Needle
+    _display->setColor(COLOR_GOLD_STAR);
+    _display->fillRect(120, 128, 5, 5);
+    char brgLine[36];
+    snprintf(brgLine, sizeof(brgLine), "NODE BRG: %03d deg (%s)",
+             (int)(brg + 0.5) % 360, card);
+    drawStr(128, 127, brgLine);
+
+    // Distance line (Y = 141)
+    char distLine[36];
     if (_gps_metric_units) {
       if (dist_m < 1000.0) {
         snprintf(distLine, sizeof(distLine), "DIST: %ld m (%.0f ft)",
@@ -2712,59 +2900,59 @@ void TapUI::drawGPSNavView() {
       }
     }
     _display->setColor(colText());
-    drawStr(14, 158, distLine);
+    drawStr(120, 141, distLine);
 
-    // Bearing & Relative Direction line (Y = 173)
-    char brgLine[52];
+    // Relative Turn / Direction line (Y = 155)
+    char relLine[36];
     if (tap_gps.hasCourse()) {
       float rel = fmod((float)brg - tap_gps.getCourseDeg() + 540.0f, 360.0f) - 180.0f;
       const char* relWord = (fabs(rel) <= 15.0f) ? "AHEAD" :
                             (fabs(rel) >= 165.0f) ? "BEHIND" :
                             (rel > 0.0f ? "RIGHT" : "LEFT");
-      snprintf(brgLine, sizeof(brgLine), "BRG: %03d deg (%s) | Rel: %+d deg %s",
-               (int)(brg + 0.5) % 360, card, (int)roundf(rel), relWord);
+      snprintf(relLine, sizeof(relLine), "TURN: %+d deg (%s)",
+               (int)roundf(rel), relWord);
+      _display->setColor(colTitle());
     } else {
-      snprintf(brgLine, sizeof(brgLine), "HEADING TO NODE: %03d deg (%s)",
-               (int)(brg + 0.5) % 360, card);
+      snprintf(relLine, sizeof(relLine), "DIR: Walk %s (%03d deg)",
+               card, (int)(brg + 0.5) % 360);
+      _display->setColor(colTitle());
     }
-    _display->setColor(COLOR_GOLD_STAR);
-    drawStr(14, 173, brgLine);
+    drawStr(120, 155, relLine);
 
-    // Target coordinates line (Y = 188)
-    char coordLine[50];
-    snprintf(coordLine, sizeof(coordLine), "Node Pos: %.5f, %.5f", tLat, tLon);
+    // Target Node coordinates (Y = 171)
+    char tPosLine[36];
+    snprintf(tPosLine, sizeof(tPosLine), "Tgt: %.4f, %.4f",
+             (double)target->lat / 1e6, (double)target->lon / 1e6);
     _display->setColor(colSubText());
-    drawStr(14, 188, coordLine);
+    drawStr(120, 171, tPosLine);
   } else {
     _display->setColor(colSubText());
-    if (!targetHasPos) {
-      drawStr(14, 162, "Selected node has no GPS coords yet.");
-      drawStr(14, 178, "Tap [REQ NODE LOC] to query its GPS.");
+    if (count == 0) {
+      drawStr(120, 130, "No nodes discovered.");
+      drawStr(120, 146, "Check NODES tab first.");
+    } else if (!targetHasPos) {
+      drawStr(120, 130, "Node has no GPS pos.");
+      drawStr(120, 146, "Tap [REQ NODE LOC]");
+      drawStr(120, 160, "below to query it.");
     } else {
-      drawStr(14, 162, "Waiting for our local GPS fix...");
-      char coordLine[50];
-      snprintf(coordLine, sizeof(coordLine), "Node Pos: %.5f, %.5f",
+      drawStr(120, 130, "Waiting for our GPS...");
+      char tPosLine[36];
+      snprintf(tPosLine, sizeof(tPosLine), "Tgt: %.4f, %.4f",
                (double)target->lat / 1e6, (double)target->lon / 1e6);
-      drawStr(14, 178, coordLine);
+      drawStr(120, 146, tPosLine);
     }
   }
 
-  // Action buttons at bottom of Card 2 (Y = 205..229):
-  // [REQ NODE LOC] (X=12..118) | [SEND MY LOC] (X=124..228) | [DM NODE] (X=234..308)
-  _display->setColor(COLOR_BLUE_KEY);
-  _display->fillRect(12, 205, 106, 24);
-  _display->setColor(COLOR_WHITE);
-  drawStr(20, 213, "REQ NODE LOC");
-
-  _display->setColor(COLOR_GREEN_BTN);
-  _display->fillRect(124, 205, 104, 24);
-  _display->setColor(COLOR_WHITE);
-  drawStr(134, 213, "SEND MY LOC");
-
-  _display->setColor(COLOR_PURPLE_BTN);
-  _display->fillRect(234, 205, 74, 24);
-  _display->setColor(COLOR_WHITE);
-  drawStr(246, 213, "DM NODE");
+  // Our own GPS position at bottom-right (Y = 186)
+  char myPosLine[36];
+  if (myHasPos) {
+    snprintf(myPosLine, sizeof(myPosLine), "Me:  %.4f, %.4f %s",
+             myLat, myLon, fixValid ? "3D" : " Sav");
+  } else {
+    strcpy(myPosLine, "Me:  Waiting for fix...");
+  }
+  _display->setColor(colMutedText());
+  drawStr(120, 186, myPosLine);
 }
 
 void TapUI::refreshGPSDataOnly() {
@@ -2888,123 +3076,8 @@ void TapUI::refreshGPSDataOnly() {
     _display->setColor(colMutedText());
     drawStr(14, 143, buf);
   } else {
-    // Subview 1: Only redraw the inner dynamic lines of Card 1 (Y=87..124) and Card 2 (Y=156..202)
-    double myLat = 0.0, myLon = 0.0;
-    bool myHasPos = false;
-    if (fixValid) {
-      myLat = (double)loc->getLatitude() / 1e6;
-      myLon = (double)loc->getLongitude() / 1e6;
-      myHasPos = (myLat != 0.0 || myLon != 0.0);
-    } else if (sensors.node_lat != 0.0 || sensors.node_lon != 0.0) {
-      myLat = sensors.node_lat;
-      myLon = sensors.node_lon;
-      myHasPos = true;
-    }
-
-    _display->setColor(colCardBg());
-    _display->fillRect(9, 87, 224, 20);
-    _display->fillRect(9, 108, 302, 16);
-
-    _display->setTextSize(2);
-    char hdgBig[16];
-    if (tap_gps.hasCourse()) {
-      float crs = tap_gps.getCourseDeg();
-      snprintf(hdgBig, sizeof(hdgBig), "%03d %s", (int)(crs + 0.5f) % 360, degToCardinal(crs));
-      _display->setColor(COLOR_GREEN_BTN);
-    } else {
-      strcpy(hdgBig, "--- --");
-      _display->setColor(colSubText());
-    }
-    drawStr(14, 88, hdgBig);
-
-    char spdBig[16];
-    if (_gps_metric_units) {
-      snprintf(spdBig, sizeof(spdBig), "%.1fkm/h", tap_gps.getSpeedKmh());
-    } else {
-      snprintf(spdBig, sizeof(spdBig), "%.1fmph", tap_gps.getSpeedMph());
-    }
-    _display->setColor(COLOR_GOLD_STAR);
-    drawStr(122, 88, spdBig);
-
-    _display->setTextSize(1);
-    _display->setColor(colSubText());
-    char myLine[54];
-    if (myHasPos) {
-      snprintf(myLine, sizeof(myLine), "%.1f kts | Me: %.5f, %.5f (%s)",
-               tap_gps.getSpeedKnots(), myLat, myLon, fixValid ? "3D Fix" : "Saved");
-    } else {
-      snprintf(myLine, sizeof(myLine), "%.1f kts | Waiting for GPS fix...", tap_gps.getSpeedKnots());
-    }
-    drawStr(14, 111, myLine);
-
-    if (count > 0) {
-      DiscoveredNodeItem* target = &items[selIdx];
-      _display->setColor(colCardBg());
-      _display->fillRect(9, 155, 302, 47);
-
-      bool targetHasPos = (target->lat != 0 || target->lon != 0);
-      if (myHasPos && targetHasPos) {
-        double tLat = (double)target->lat / 1e6;
-        double tLon = (double)target->lon / 1e6;
-        double dist_m = calcDistanceMeters(myLat, myLon, tLat, tLon);
-        double brg = calcBearingDegrees(myLat, myLon, tLat, tLon);
-        const char* card = degToCardinal((float)brg);
-
-        char distLine[50];
-        if (_gps_metric_units) {
-          if (dist_m < 1000.0) {
-            snprintf(distLine, sizeof(distLine), "DIST: %ld m (%.0f ft)",
-                     (long)(dist_m + 0.5), dist_m * 3.28084);
-          } else {
-            snprintf(distLine, sizeof(distLine), "DIST: %.2f km (%.2f mi)",
-                     dist_m / 1000.0, dist_m / 1609.344);
-          }
-        } else {
-          double dist_ft = dist_m * 3.28084;
-          if (dist_ft < 5280.0) {
-            snprintf(distLine, sizeof(distLine), "DIST: %ld ft (%ld m)",
-                     (long)(dist_ft + 0.5), (long)(dist_m + 0.5));
-          } else {
-            snprintf(distLine, sizeof(distLine), "DIST: %.2f mi (%.2f km)",
-                     dist_m / 1609.344, dist_m / 1000.0);
-          }
-        }
-        _display->setColor(colText());
-        drawStr(14, 158, distLine);
-
-        char brgLine[52];
-        if (tap_gps.hasCourse()) {
-          float rel = fmod((float)brg - tap_gps.getCourseDeg() + 540.0f, 360.0f) - 180.0f;
-          const char* relWord = (fabs(rel) <= 15.0f) ? "AHEAD" :
-                                (fabs(rel) >= 165.0f) ? "BEHIND" :
-                                (rel > 0.0f ? "RIGHT" : "LEFT");
-          snprintf(brgLine, sizeof(brgLine), "BRG: %03d deg (%s) | Rel: %+d deg %s",
-                   (int)(brg + 0.5) % 360, card, (int)roundf(rel), relWord);
-        } else {
-          snprintf(brgLine, sizeof(brgLine), "HEADING TO NODE: %03d deg (%s)",
-                   (int)(brg + 0.5) % 360, card);
-        }
-        _display->setColor(COLOR_GOLD_STAR);
-        drawStr(14, 173, brgLine);
-
-        char coordLine[50];
-        snprintf(coordLine, sizeof(coordLine), "Node Pos: %.5f, %.5f", tLat, tLon);
-        _display->setColor(colSubText());
-        drawStr(14, 188, coordLine);
-      } else {
-        _display->setColor(colSubText());
-        if (!targetHasPos) {
-          drawStr(14, 162, "Selected node has no GPS coords yet.");
-          drawStr(14, 178, "Tap [REQ NODE LOC] to query its GPS.");
-        } else {
-          drawStr(14, 162, "Waiting for our local GPS fix...");
-          char coordLine[50];
-          snprintf(coordLine, sizeof(coordLine), "Node Pos: %.5f, %.5f",
-                   (double)target->lat / 1e6, (double)target->lon / 1e6);
-          drawStr(14, 178, coordLine);
-        }
-      }
-    }
+    // Subview 1: Flicker-free update of the Compass & Navigation Card interior only
+    drawGPSNavInterior();
   }
 }
 
@@ -3103,10 +3176,11 @@ void TapUI::handleGPSStatusTouch(uint16_t tx, uint16_t ty) {
 }
 
 void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
-  // Unit toggle [UNIT:KM/H] / [UNIT:MPH] (X=230..310, Y=68..92)
-  if (tx >= 230 && tx <= 310 && ty >= 68 && ty <= 92) {
+  // Unit toggle [KM/H] / [MPH] inside the compass card top-right (X=240..312, Y=90..112)
+  if (tx >= 240 && tx <= 312 && ty >= 90 && ty <= 112) {
     _gps_metric_units = !_gps_metric_units;
-    _needs_full_redraw = true;
+    _last_gps_card_hash = 0;
+    drawGPSNavInterior();
     return;
   }
 
@@ -3122,15 +3196,15 @@ void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Contact Selector [< NODE] (X=10..68, Y=131..156) / [NODE >] (X=252..310, Y=131..156)
-  if (ty >= 130 && ty <= 156) {
-    if (tx >= 10 && tx <= 68) {
+  // Top Contact Selector Bar [< NODE] (X=8..64, Y=66..88) / [NODE >] (X=256..312, Y=66..88)
+  if (ty >= 66 && ty <= 88) {
+    if (tx >= 8 && tx <= 64) {
       selIdx = (selIdx - 1 + count) % count;
       _gps_nav_target_slot = items[selIdx].contact_idx;
       _needs_full_redraw = true;
       return;
     }
-    if (tx >= 252 && tx <= 310) {
+    if (tx >= 256 && tx <= 312) {
       selIdx = (selIdx + 1) % count;
       _gps_nav_target_slot = items[selIdx].contact_idx;
       _needs_full_redraw = true;
@@ -3138,13 +3212,13 @@ void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
     }
   }
 
-  // Action buttons at bottom of Card 2 (Y=202..234)
-  if (ty >= 202 && ty <= 234) {
+  // Action buttons at bottom (Y=204..234)
+  if (ty >= 204 && ty <= 234) {
     ContactInfo c;
     bool validContact = the_mesh.getContactByIdx(items[selIdx].contact_idx, c);
 
-    // [REQ NODE LOC] (X=12..120) -> Request telemetry + send self-advert
-    if (tx >= 10 && tx <= 120 && validContact) {
+    // [REQ NODE LOC] (X=8..112) -> Request telemetry + send self-advert
+    if (tx >= 8 && tx <= 112 && validContact) {
       uint32_t tag = 0, est_timeout = 0;
       the_mesh.sendRequest(c, REQ_TYPE_GET_TELEMETRY_DATA, tag, est_timeout);
       the_mesh.advert();
@@ -3152,8 +3226,8 @@ void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
       return;
     }
 
-    // [SEND MY LOC] (X=124..230) -> Send our coords/speed/heading to selected contact & advert
-    if (tx >= 122 && tx <= 230 && validContact) {
+    // [SEND MY LOC] (X=114..218) -> Send our coords/speed/heading to selected contact & advert
+    if (tx >= 114 && tx <= 218 && validContact) {
       syncGPSWithMesh();
       the_mesh.advert();
       _active_contact_idx = items[selIdx].contact_idx;
@@ -3184,8 +3258,8 @@ void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
       return;
     }
 
-    // [DM NODE] (X=234..310) -> Open DM chat with selected contact
-    if (tx >= 232 && tx <= 310 && validContact) {
+    // [DM NODE] (X=220..312) -> Open DM chat with selected contact
+    if (tx >= 220 && tx <= 312 && validContact) {
       _active_contact_idx = items[selIdx].contact_idx;
       _chat_scroll_offset = 0;
       _current_tab = TAB_CHAT;

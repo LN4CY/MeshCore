@@ -177,6 +177,10 @@ private:
   void drawGPSScreen();
   void drawGPSStatusView();
   void drawGPSNavView();
+  void drawGPSNavInterior();
+  void drawLine(int x0, int y0, int x1, int y1, int thickness = 1);
+  void drawCircleOutline(int cx, int cy, int r);
+  void drawCompassPointer(int cx, int cy, float angle_deg, int r_tip, int r_tail, int half_w, uint16_t color);
   void refreshGPSDataOnly();
   void drawRadioScreen();
   void drawRadioRFView();
