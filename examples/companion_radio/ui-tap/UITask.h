@@ -1,0 +1,54 @@
+#pragma once
+
+#include <MeshCore.h>
+#include <helpers/ui/DisplayDriver.h>
+#include <helpers/SensorManager.h>
+#include <helpers/MultiSerialInterface.h>
+#include <helpers/InterTaskMailboxInterface.h>
+#include <Arduino.h>
+
+#include "../AbstractUITask.h"
+#include "../NodePrefs.h"
+#include "../MyMesh.h"
+#include "TapClient.h"
+#include "TapUI.h"
+
+#if defined(NRF52_PLATFORM)
+  #include <FreeRTOS.h>
+  #include <task.h>
+#elif defined(ESP32)
+  #include <freertos/FreeRTOS.h>
+  #include <freertos/task.h>
+#endif
+
+class UITask : public AbstractUITask {
+private:
+  DisplayDriver* _display;
+  SensorManager* _sensors;
+  NodePrefs* _node_prefs;
+
+  TapClient _client;
+  TapUI _ui;
+
+  TaskHandle_t _ui_task_handle;
+  unsigned long _last_batt_check;
+
+  static void uiTaskRunner(void* pvParameters);
+
+public:
+  UITask(mesh::MainBoard* board, MultiSerialInterface* serial);
+
+  void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
+  void notify(UIEventType t = UIEventType::none) override;
+  void loop() override;
+
+  // MyMesh::Listener overrides
+  void onMessageRecv(mesh::Packet *pkt, const ContactInfo &from, uint8_t txt_type, uint32_t sender_timestamp, const char* text) override;
+  void onChannelMessageRecv(mesh::Packet *pkt, ChannelDetails& channel_details, const char* text) override;
+  void onQueueSizeChanged(int msgcount) override;
+  void onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) override;
+  void onControlDataRecv(const mesh::Packet* pkt) override;
+  void onACKRecv(uint32_t ack_crc) override;
+
+  void updateUI();
+};
