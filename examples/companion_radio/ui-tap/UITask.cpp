@@ -32,22 +32,46 @@ void UITask::onMessageRecv(mesh::Packet *pkt, const ContactInfo &from, uint8_t t
 }
 
 void UITask::onChannelMessageRecv(mesh::Packet *pkt, ChannelDetails& channel_details, const char* text) {
-  Serial.printf("[UI] Channel Message on #%s: %s\r\n", channel_details.name, text ? text : "");
-  char sender[24];
-  strcpy(sender, channel_details.name[0] ? channel_details.name : "Public");
+  Serial.printf("[UI] Channel Message on %s: %s\r\n", channel_details.name, text ? text : "");
 
   uint8_t ch_idx = 0;
-  for (int i = 0; i < 4; i++) {
+  bool matched = false;
+  for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
     ChannelDetails ch;
     if (the_mesh.getChannel(i, ch)) {
-      if (strcmp(ch.name, channel_details.name) == 0) {
-        ch_idx = i;
+      if (ch.name[0] != 0 && strcmp(ch.name, channel_details.name) == 0) {
+        ch_idx = (uint8_t)i;
+        matched = true;
         break;
       }
     }
   }
+  if (!matched) {
+    for (int i = 0; i < MAX_GROUP_CHANNELS; i++) {
+      ChannelDetails ch;
+      if (the_mesh.getChannel(i, ch)) {
+        if (memcmp(ch.channel.secret, channel_details.channel.secret, 16) == 0) {
+          ch_idx = (uint8_t)i;
+          break;
+        }
+      }
+    }
+  }
 
-  _ui.addReceivedChannelMessage(ch_idx, channel_details.name, sender, text ? text : "");
+  char sender[24];
+  const char* msg_body = text ? text : "";
+  const char* sep = msg_body ? strstr(msg_body, ": ") : nullptr;
+  if (sep && sep > msg_body && (size_t)(sep - msg_body) < sizeof(sender)) {
+    size_t slen = (size_t)(sep - msg_body);
+    memcpy(sender, msg_body, slen);
+    sender[slen] = 0;
+    msg_body = sep + 2;
+  } else {
+    strncpy(sender, channel_details.name[0] ? channel_details.name : "Public", sizeof(sender) - 1);
+    sender[sizeof(sender) - 1] = 0;
+  }
+
+  _ui.addReceivedChannelMessage(ch_idx, channel_details.name, sender, msg_body);
 }
 
 void UITask::onQueueSizeChanged(int msgcount) {

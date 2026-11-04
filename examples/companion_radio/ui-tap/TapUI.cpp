@@ -1036,6 +1036,8 @@ void TapUI::addReceivedMessage(const char* sender, const char* text, bool isDire
 
   if (_current_tab == TAB_CHAT) {
     _needs_chat_messages_redraw = true;
+  } else if (_current_tab == TAB_NODES) {
+    _needs_full_redraw = true;
   } else {
     _needs_tabbar_redraw = true;
   }
@@ -1066,8 +1068,10 @@ void TapUI::addReceivedChannelMessage(uint8_t channel_idx, const char* channel_n
                       _chat_scroll_offset == 0 && _active_contact_idx == -1 && _active_channel == channel_idx);
   m->unread = !viewing_now;
 
-  if (_current_tab == TAB_CHAT && _active_contact_idx == -1 && _active_channel == channel_idx) {
+  if (_current_tab == TAB_CHAT) {
     _needs_chat_messages_redraw = true;
+  } else if (_current_tab == TAB_CHANS) {
+    _needs_full_redraw = true;
   } else {
     _needs_tabbar_redraw = true;
   }
@@ -1425,8 +1429,12 @@ void TapUI::drawChatMessagesOnly() {
   // Filter messages for currently selected target
   ContactInfo active_c;
   bool hasActiveContact = false;
+  ChannelDetails active_ch;
+  memset(&active_ch, 0, sizeof(active_ch));
   if (_active_contact_idx >= 0) {
     hasActiveContact = the_mesh.getContactByIdx(_active_contact_idx, active_c);
+  } else {
+    the_mesh.getChannel(_active_channel, active_ch);
   }
 
   int matchCount = 0;
@@ -1442,7 +1450,9 @@ void TapUI::drawChatMessagesOnly() {
         }
       }
     } else {
-      if (!m->is_direct && m->channel_idx == _active_channel) {
+      if (!m->is_direct &&
+          (m->channel_idx == _active_channel ||
+           (active_ch.name[0] != 0 && strcmp(m->target_name, active_ch.name) == 0))) {
         _chat_match_indices[matchCount++] = i;
       }
     }
