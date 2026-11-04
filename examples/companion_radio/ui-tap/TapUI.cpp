@@ -661,14 +661,14 @@ void TapUI::markAllMessagesRead() {
   _needs_full_redraw = true;
 }
 
-int TapUI::buildSortedContactList(DiscoveredNodeItem* items, int max_items) const {
+int TapUI::buildSortedContactList(DiscoveredNodeItem* items, int max_items) {
   int total_slots = the_mesh.getTotalContactSlots();
   int count = 0;
+  ContactInfo c; // Single ContactInfo instance (~152 bytes)
 
   // Pass 0: Favorites first (pass == 0), then non-favorites (pass == 1)
   for (int pass = 0; pass < 2; pass++) {
     for (int i = 8; i < total_slots && count < max_items; i++) {
-      ContactInfo c;
       if (!the_mesh.getContactByIdx(i, c)) continue;
       if (c.type == 0) continue; // ADV_TYPE_NONE
 
@@ -1429,7 +1429,6 @@ void TapUI::drawChatMessagesOnly() {
     hasActiveContact = the_mesh.getContactByIdx(_active_contact_idx, active_c);
   }
 
-  int matchIndices[MAX_UI_MESSAGES];
   int matchCount = 0;
 
   for (int i = 0; i < _msg_count; i++) {
@@ -1439,12 +1438,12 @@ void TapUI::drawChatMessagesOnly() {
         if (memcmp(m->contact_pubkey, active_c.id.pub_key, 4) == 0 ||
             strcmp(m->sender, active_c.name) == 0 ||
             strcmp(m->target_name, active_c.name) == 0) {
-          matchIndices[matchCount++] = i;
+          _chat_match_indices[matchCount++] = i;
         }
       }
     } else {
       if (!m->is_direct && m->channel_idx == _active_channel) {
-        matchIndices[matchCount++] = i;
+        _chat_match_indices[matchCount++] = i;
       }
     }
   }
@@ -1483,7 +1482,7 @@ void TapUI::drawChatMessagesOnly() {
 
   int y = 46;
   for (int k = startIdx; k < endIdx; k++) {
-    UIMessage* m = &_messages[matchIndices[k]];
+    UIMessage* m = &_messages[_chat_match_indices[k]];
     bool wasUnread = m->unread;
     m->unread = false; // Mark read now that the user is viewing it
 
@@ -1781,8 +1780,7 @@ void TapUI::drawNodesScreen() {
   _display->setColor(colBg());
   _display->fillRect(0, 44, 320, 196);
 
-  DiscoveredNodeItem items[48];
-  int count = buildSortedContactList(items, 48);
+  int count = buildSortedContactList(_sorted_nodes, MAX_SORTED_NODES);
 
   // Header row
   _display->setColor(colTitle());
@@ -1822,7 +1820,7 @@ void TapUI::drawNodesScreen() {
 
   int y = 70;
   for (int i = start; i < end; i++) {
-    DiscoveredNodeItem* item = &items[i];
+    DiscoveredNodeItem* item = &_sorted_nodes[i];
 
     uint16_t boxBg = _dark_mode ? COLOR_DK_CLIENT_BG : COLOR_CARD_CLIENT_BG;
     uint16_t boxBd = COLOR_CARD_CLIENT_BD;
@@ -1929,8 +1927,7 @@ void TapUI::handleNodesTouch(uint16_t tx, uint16_t ty) {
     return;
   }
 
-  DiscoveredNodeItem items[48];
-  int count = buildSortedContactList(items, 48);
+  int count = buildSortedContactList(_sorted_nodes, MAX_SORTED_NODES);
   int itemsPerPage = 3;
   int maxPages = (count + itemsPerPage - 1) / itemsPerPage;
 
@@ -1957,11 +1954,11 @@ void TapUI::handleNodesTouch(uint16_t tx, uint16_t ty) {
     if (ty >= y && ty <= y + 46) {
       if (tx >= 196 && tx <= 248) {
         // Toggle favorite flag!
-        toggleContactFavorite(items[i].contact_idx);
+        toggleContactFavorite(_sorted_nodes[i].contact_idx);
         return;
       } else {
         // Open Direct Chat with this contact
-        _active_contact_idx = items[i].contact_idx;
+        _active_contact_idx = _sorted_nodes[i].contact_idx;
         _chat_scroll_offset = 0;
         _current_tab = TAB_CHAT;
         _needs_full_redraw = true;
@@ -2573,8 +2570,10 @@ void TapUI::drawLine(int x0, int y0, int x1, int y1, int thickness) {
   int sy = (y0 < y1) ? 1 : -1;
   int err = dx + dy;
   int off = (thickness > 1) ? -(thickness / 2) : 0;
+  int maxSteps = dx - dy + 2;
+  if (maxSteps > 600) maxSteps = 600;
 
-  while (true) {
+  while (maxSteps-- > 0) {
     _display->fillRect(x0 + off, y0 + off, thickness, thickness);
     if (x0 == x1 && y0 == y1) break;
     int e2 = 2 * err;
@@ -2590,7 +2589,7 @@ void TapUI::drawLine(int x0, int y0, int x1, int y1, int thickness) {
 }
 
 void TapUI::drawCircleOutline(int cx, int cy, int r) {
-  if (!_display || r <= 0) return;
+  if (!_display || r <= 0 || r > 200) return;
   int x = 0;
   int y = r;
   int d = 3 - 2 * r;
@@ -2614,7 +2613,7 @@ void TapUI::drawCircleOutline(int cx, int cy, int r) {
 }
 
 void TapUI::drawCompassPointer(int cx, int cy, float angle_deg, int r_tip, int r_tail, int half_w, uint16_t color) {
-  if (!_display) return;
+  if (!_display || isnan(angle_deg) || isinf(angle_deg)) return;
   float rad = angle_deg * 0.0174532925f;
   float sinA = sinf(rad);
   float cosA = cosf(rad);
@@ -2658,8 +2657,7 @@ void TapUI::drawGPSNavView() {
   _display->setColor(colBorder());
   _display->drawRect(8, 67, 304, 20);
 
-  DiscoveredNodeItem items[48];
-  int count = buildSortedContactList(items, 48);
+  int count = buildSortedContactList(_sorted_nodes, MAX_SORTED_NODES);
 
   if (count > 0) {
     if (_gps_nav_target_slot < 0 && _active_contact_idx >= 0) {
@@ -2667,13 +2665,13 @@ void TapUI::drawGPSNavView() {
     }
     int selIdx = 0;
     for (int i = 0; i < count; i++) {
-      if (items[i].contact_idx == _gps_nav_target_slot) {
+      if (_sorted_nodes[i].contact_idx == _gps_nav_target_slot) {
         selIdx = i;
         break;
       }
     }
-    _gps_nav_target_slot = items[selIdx].contact_idx;
-    DiscoveredNodeItem* target = &items[selIdx];
+    _gps_nav_target_slot = _sorted_nodes[selIdx].contact_idx;
+    DiscoveredNodeItem* target = &_sorted_nodes[selIdx];
 
     _display->setColor(COLOR_BLUE_KEY);
     _display->fillRect(9, 68, 48, 18);
@@ -2747,18 +2745,17 @@ void TapUI::drawGPSNavInterior() {
     myHasPos = true;
   }
 
-  DiscoveredNodeItem items[48];
-  int count = buildSortedContactList(items, 48);
+  int count = buildSortedContactList(_sorted_nodes, MAX_SORTED_NODES);
   DiscoveredNodeItem* target = nullptr;
   if (count > 0) {
     int selIdx = 0;
     for (int i = 0; i < count; i++) {
-      if (items[i].contact_idx == _gps_nav_target_slot) {
+      if (_sorted_nodes[i].contact_idx == _gps_nav_target_slot) {
         selIdx = i;
         break;
       }
     }
-    target = &items[selIdx];
+    target = &_sorted_nodes[selIdx];
   }
   bool targetHasPos = (target != nullptr && (target->lat != 0 || target->lon != 0));
   double brg = 0.0;
@@ -2969,19 +2966,18 @@ void TapUI::refreshGPSDataOnly() {
   int crs_deg = tap_gps.hasCourse() ? ((int)(tap_gps.getCourseDeg() + 0.5f) % 360) : -1;
   uint32_t rx_kb = fixValid ? 0 : (tap_gps.getUartBytes() / 512UL);
 
-  DiscoveredNodeItem items[48];
-  int count = (_gps_subview == 1) ? buildSortedContactList(items, 48) : 0;
+  int count = (_gps_subview == 1) ? buildSortedContactList(_sorted_nodes, MAX_SORTED_NODES) : 0;
   int selIdx = 0;
   int32_t tLat_e6 = 0, tLon_e6 = 0;
   if (_gps_subview == 1 && count > 0) {
     for (int i = 0; i < count; i++) {
-      if (items[i].contact_idx == _gps_nav_target_slot) {
+      if (_sorted_nodes[i].contact_idx == _gps_nav_target_slot) {
         selIdx = i;
         break;
       }
     }
-    tLat_e6 = items[selIdx].lat;
-    tLon_e6 = items[selIdx].lon;
+    tLat_e6 = _sorted_nodes[selIdx].lat;
+    tLon_e6 = _sorted_nodes[selIdx].lon;
   }
 
   // Compute FNV-1a hash of the displayed values
@@ -3184,13 +3180,12 @@ void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
     return;
   }
 
-  DiscoveredNodeItem items[48];
-  int count = buildSortedContactList(items, 48);
+  int count = buildSortedContactList(_sorted_nodes, MAX_SORTED_NODES);
   if (count == 0) return;
 
   int selIdx = 0;
   for (int i = 0; i < count; i++) {
-    if (items[i].contact_idx == _gps_nav_target_slot) {
+    if (_sorted_nodes[i].contact_idx == _gps_nav_target_slot) {
       selIdx = i;
       break;
     }
@@ -3200,13 +3195,13 @@ void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
   if (ty >= 66 && ty <= 88) {
     if (tx >= 8 && tx <= 64) {
       selIdx = (selIdx - 1 + count) % count;
-      _gps_nav_target_slot = items[selIdx].contact_idx;
+      _gps_nav_target_slot = _sorted_nodes[selIdx].contact_idx;
       _needs_full_redraw = true;
       return;
     }
     if (tx >= 256 && tx <= 312) {
       selIdx = (selIdx + 1) % count;
-      _gps_nav_target_slot = items[selIdx].contact_idx;
+      _gps_nav_target_slot = _sorted_nodes[selIdx].contact_idx;
       _needs_full_redraw = true;
       return;
     }
@@ -3215,7 +3210,7 @@ void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
   // Action buttons at bottom (Y=204..234)
   if (ty >= 204 && ty <= 234) {
     ContactInfo c;
-    bool validContact = the_mesh.getContactByIdx(items[selIdx].contact_idx, c);
+    bool validContact = the_mesh.getContactByIdx(_sorted_nodes[selIdx].contact_idx, c);
 
     // [REQ NODE LOC] (X=8..112) -> Request telemetry + send self-advert
     if (tx >= 8 && tx <= 112 && validContact) {
@@ -3230,7 +3225,7 @@ void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
     if (tx >= 114 && tx <= 218 && validContact) {
       syncGPSWithMesh();
       the_mesh.advert();
-      _active_contact_idx = items[selIdx].contact_idx;
+      _active_contact_idx = _sorted_nodes[selIdx].contact_idx;
       LocationProvider* loc = sensors.getLocationProvider();
       char locMsg[64];
       if (loc && loc->isEnabled() && loc->isValid()) {
@@ -3260,7 +3255,7 @@ void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
 
     // [DM NODE] (X=220..312) -> Open DM chat with selected contact
     if (tx >= 220 && tx <= 312 && validContact) {
-      _active_contact_idx = items[selIdx].contact_idx;
+      _active_contact_idx = _sorted_nodes[selIdx].contact_idx;
       _chat_scroll_offset = 0;
       _current_tab = TAB_CHAT;
       _needs_full_redraw = true;

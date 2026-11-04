@@ -7,6 +7,7 @@
 
 #define MAX_UI_MESSAGES 64
 #define MAX_MSG_TEXT_LEN 64
+#define MAX_SORTED_NODES 48
 
 struct UIMessage {
   char sender[24];
@@ -121,6 +122,10 @@ private:
   uint8_t _msg_count;
   int _chat_scroll_offset; // 0 = latest at bottom, >0 = scrolled up N messages
 
+  // Persistent sorted contact list buffer (avoids 2.6 KB stack allocations in FreeRTOS loop task!)
+  DiscoveredNodeItem _sorted_nodes[MAX_SORTED_NODES];
+  int _chat_match_indices[MAX_UI_MESSAGES];
+
   // Text buffer for full keyboard input
   char _text_buffer[MAX_MSG_TEXT_LEN];
   uint8_t _text_len;
@@ -165,7 +170,7 @@ private:
     if (_display) _display->drawTextLeftAlign(x, y, str);
   }
 
-  int buildSortedContactList(DiscoveredNodeItem* items, int max_items) const;
+  int buildSortedContactList(DiscoveredNodeItem* items, int max_items);
 
   void drawStatusBar();
   void drawTabBar();
