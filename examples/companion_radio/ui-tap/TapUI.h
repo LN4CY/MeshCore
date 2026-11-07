@@ -6,8 +6,16 @@
 #include "../MyMesh.h"
 
 #define MAX_UI_MESSAGES 64
-#define MAX_MSG_TEXT_LEN 64
+#define MAX_MSG_TEXT_LEN 160
 #define MAX_SORTED_NODES 48
+#define MAX_CHAT_LINES 128
+#define VISIBLE_CHAT_LINES 6
+#define CHAT_LINE_HEIGHT 12
+
+struct ChatLineItem {
+  char text[48];
+  uint16_t color;
+};
 
 struct UIMessage {
   char sender[24];
@@ -120,7 +128,18 @@ private:
   // Messages log & scroll state
   UIMessage _messages[MAX_UI_MESSAGES];
   uint8_t _msg_count;
-  int _chat_scroll_offset; // 0 = latest at bottom, >0 = scrolled up N messages
+  int _chat_scroll_offset; // 0 = latest at bottom, >0 = scrolled up N lines
+
+  // Persistent wrapped chat lines buffer (stored in .bss)
+  ChatLineItem _chat_lines[MAX_CHAT_LINES];
+  int _total_chat_lines;
+
+  // Signal strength metrics (top-right status bar)
+  uint32_t _last_rx_packet_count;
+  unsigned long _last_rx_packet_ms;
+  float _last_rx_rssi;
+  float _last_rx_snr;
+  bool _sig_show_snr;
 
   // Persistent sorted contact list buffer (avoids 2.6 KB stack allocations in FreeRTOS loop task!)
   DiscoveredNodeItem _sorted_nodes[MAX_SORTED_NODES];
@@ -173,9 +192,11 @@ private:
   int buildSortedContactList(DiscoveredNodeItem* items, int max_items);
 
   void drawStatusBar();
+  void drawSignalBars(int bx, int by, float rssi, float snr, bool recent);
   void drawTabBar();
   void drawChatScreen();
   void drawChatMessagesOnly();
+  void formatAndWrapMessage(const char* prefix, const char* text, uint16_t color);
   void drawNodesScreen();
   void drawChansScreen();
   void drawChannelEditor();

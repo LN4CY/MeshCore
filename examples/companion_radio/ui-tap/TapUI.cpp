@@ -169,6 +169,12 @@ TapUI::TapUI()
     _radio_subview(0),
     _msg_count(0),
     _chat_scroll_offset(0),
+    _total_chat_lines(0),
+    _last_rx_packet_count(0),
+    _last_rx_packet_ms(0),
+    _last_rx_rssi(-128.0f),
+    _last_rx_snr(0.0f),
+    _sig_show_snr(false),
     _text_len(0),
     _nodes_page(0),
     _gps_baud(9600),
@@ -1152,6 +1158,18 @@ void TapUI::update() {
     board.setBacklight(false);
   }
 
+  // Live signal metrics from radio driver (refreshes status bar on incoming RF packet)
+  uint32_t rx_pkts = radio_driver.getPacketsRecv();
+  if (rx_pkts != _last_rx_packet_count) {
+    _last_rx_packet_count = rx_pkts;
+    _last_rx_packet_ms = now;
+    _last_rx_rssi = radio_driver.getLastRSSI();
+    _last_rx_snr = radio_driver.getLastSNR();
+    if (!_is_screen_sleeping && !_needs_full_redraw) {
+      drawStatusBar();
+    }
+  }
+
   // Flicker-free partial refresh when viewing the GPS tab (only redraws card interior when values change)
   if (!_is_screen_sleeping && _current_tab == TAB_GPS && !_needs_full_redraw && (now - _last_gps_ui_refresh_ms > 3000UL)) {
     _last_gps_ui_refresh_ms = now;
@@ -1173,7 +1191,14 @@ void TapUI::update() {
       uint16_t tx = pt.x;
       uint16_t ty = pt.y;
 
-      if (ty >= 20 && ty <= 42) {
+      if (ty < 20) {
+        if (tx >= 240) {
+          // Top-right tap toggles RSSI (dBm) vs SNR (dB) readout
+          _sig_show_snr = !_sig_show_snr;
+          drawStatusBar();
+          return;
+        }
+      } else if (ty >= 20 && ty <= 42) {
         handleTabTouch(tx, ty);
       } else {
         switch (_current_tab) {
@@ -1229,86 +1254,141 @@ void TapUI::drawStatusBar() {
   _display->setTextSize(1);
   _display->setColor(COLOR_WHITE);
 
-  // 1. Left: Active Target (X = 3..63, max 10 chars)
-  char recBuf[14];
+  // 1. Left: Active Target (X = 3..52, max 8 chars)
+  char recBuf[12];
   if (_active_contact_idx >= 0) {
     ContactInfo c;
     if (the_mesh.getContactByIdx(_active_contact_idx, c)) {
-      if (c.name[0] != 0) snprintf(recBuf, sizeof(recBuf), "@%.9s", c.name);
-      else snprintf(recBuf, sizeof(recBuf), "@!%02X%02X%02X", c.id.pub_key[0], c.id.pub_key[1], c.id.pub_key[2]);
+      if (c.name[0] != 0) snprintf(recBuf, sizeof(recBuf), "@%.7s", c.name);
+      else snprintf(recBuf, sizeof(recBuf), "@!%02X%02X", c.id.pub_key[0], c.id.pub_key[1]);
     } else {
       strcpy(recBuf, "@Node");
     }
   } else {
     ChannelDetails ch;
     if (the_mesh.getChannel(_active_channel, ch)) {
-      if (ch.name[0] == '#') snprintf(recBuf, sizeof(recBuf), "%.10s", ch.name);
-      else snprintf(recBuf, sizeof(recBuf), "#%.9s", ch.name[0] ? ch.name : "Public");
+      if (ch.name[0] == '#') snprintf(recBuf, sizeof(recBuf), "%.8s", ch.name);
+      else snprintf(recBuf, sizeof(recBuf), "#%.7s", ch.name[0] ? ch.name : "Public");
     } else {
       strcpy(recBuf, "#Public");
     }
   }
   drawStr(3, 5, recBuf);
 
-  // 2. BLE Status / PIN (X = 66..126)
+  // 2. BLE Status / PIN (X = 55..104)
   if (!_ble_enabled) {
     _display->setColor(COLOR_MED_GRAY);
-    drawStr(66, 5, "BT:OFF");
+    drawStr(55, 5, "BT:OFF");
   } else if (ui_task.hasConnection()) {
     _display->setColor(COLOR_GREEN_BTN);
-    drawStr(66, 5, "BT:CONN");
+    drawStr(55, 5, "BT:CONN");
   } else if (the_mesh.getBLEPin() != 0) {
-    char pinBuf[14];
-    snprintf(pinBuf, sizeof(pinBuf), "PIN:%06lu", (unsigned long)the_mesh.getBLEPin());
+    char pinBuf[12];
+    snprintf(pinBuf, sizeof(pinBuf), "P:%06lu", (unsigned long)the_mesh.getBLEPin());
     _display->setColor(COLOR_ORANGE_BTN);
-    drawStr(66, 5, pinBuf);
+    drawStr(55, 5, pinBuf);
   } else {
     _display->setColor(COLOR_GREEN_BTN);
-    drawStr(66, 5, "BT:ON");
+    drawStr(55, 5, "BT:ON");
   }
 
-  // 3. GPS Status (X = 130..166)
+  // 3. GPS Status (X = 107..130)
   LocationProvider* loc = sensors.getLocationProvider();
   if (loc && loc->isEnabled()) {
     if (loc->isValid()) {
       char gpsBuf[10];
       snprintf(gpsBuf, sizeof(gpsBuf), "G:%ld", loc->satellitesCount());
       _display->setColor(COLOR_GREEN_BTN);
-      drawStr(130, 5, gpsBuf);
+      drawStr(107, 5, gpsBuf);
     } else {
       _display->setColor(COLOR_ORANGE_BTN);
-      drawStr(130, 5, "G:..");
+      drawStr(107, 5, "G:..");
     }
   } else {
     _display->setColor(COLOR_MED_GRAY);
-    drawStr(130, 5, "G:--");
+    drawStr(107, 5, "G:--");
   }
 
-  // 4. Clock HH:MM (X = 166..196)
+  // 4. Clock HH:MM (X = 134..164)
   char clkBuf[10];
   formatLocalDateTime(clkBuf, sizeof(clkBuf), false, false);
   _display->setColor(COLOR_WHITE);
-  drawStr(166, 5, clkBuf);
+  drawStr(134, 5, clkBuf);
 
-  // 5. Battery Icon + Percentage + Voltage (X = 202..318)
+  // 5. Battery Icon + Percentage + Voltage (X = 168..240)
   uint16_t mv = board.getBattMilliVolts();
   uint8_t pct = calcBatteryPercent(mv);
   uint16_t batCol = (pct > 40) ? COLOR_GREEN_BTN : ((pct > 18) ? COLOR_ORANGE_BTN : COLOR_RED_BTN);
 
-  // Draw battery outline (16x10 at x=202, y=5) + positive terminal nub (2x4 at x=218, y=8)
+  // Draw battery outline (14x9 at x=168, y=5) + positive terminal nub (2x5 at x=182, y=7)
   _display->setColor(COLOR_WHITE);
-  _display->drawRect(202, 5, 16, 10);
-  _display->fillRect(218, 8, 2, 4);
-  int fillW = (pct * 12) / 100;
+  _display->drawRect(168, 5, 14, 9);
+  _display->fillRect(182, 7, 2, 5);
+  int fillW = (pct * 10) / 100;
   if (fillW > 0) {
     _display->setColor(batCol);
-    _display->fillRect(204, 7, fillW, 6);
+    _display->fillRect(170, 7, fillW, 5);
   }
 
   char batBuf[18];
-  snprintf(batBuf, sizeof(batBuf), "%u%% %.2fV", pct, (float)mv / 1000.0f);
+  snprintf(batBuf, sizeof(batBuf), "%u%% %.1fV", pct, (float)mv / 1000.0f);
   _display->setColor(batCol);
-  drawStr(223, 5, batBuf);
+  drawStr(187, 5, batBuf);
+
+  // 6. Signal Strength Indicator on Top Right (X = 246..318)
+  bool sig_recent = (_last_rx_packet_count > 0) && (millis() - _last_rx_packet_ms < 180000UL);
+  drawSignalBars(246, 5, _last_rx_rssi, _last_rx_snr, sig_recent);
+}
+
+void TapUI::drawSignalBars(int bx, int by, float rssi, float snr, bool recent) {
+  int active_bars = 0;
+  uint16_t active_col = COLOR_MED_GRAY;
+
+  if (recent) {
+    if (rssi >= -95.0f) {
+      active_bars = 4;
+      active_col = COLOR_GREEN_BTN;
+    } else if (rssi >= -108.0f) {
+      active_bars = 3;
+      active_col = COLOR_GREEN_BTN;
+    } else if (rssi >= -118.0f) {
+      active_bars = 2;
+      active_col = COLOR_ORANGE_BTN;
+    } else {
+      active_bars = 1;
+      active_col = COLOR_RED_BTN;
+    }
+  }
+
+  // 4 cellular-style signal bars
+  // Base Y is by + 9 (y = 14)
+  const int bar_heights[4] = {3, 5, 7, 9};
+  for (int i = 0; i < 4; i++) {
+    int h = bar_heights[i];
+    int x = bx + i * 4;
+    int y = by + 9 - h + 1;
+    if (i < active_bars) {
+      _display->setColor(active_col);
+      _display->fillRect(x, y, 2, h);
+    } else {
+      _display->setColor(COLOR_MED_GRAY);
+      _display->drawRect(x, y, 2, h);
+    }
+  }
+
+  // Live dBm / SNR readout text beside bars
+  char sigBuf[12];
+  if (!recent) {
+    strcpy(sigBuf, "--dB");
+    _display->setColor(COLOR_MED_GRAY);
+  } else if (_sig_show_snr) {
+    snprintf(sigBuf, sizeof(sigBuf), "%+ddB", (int)snr);
+    _display->setColor(active_col);
+  } else {
+    snprintf(sigBuf, sizeof(sigBuf), "%ddB", (int)rssi);
+    _display->setColor(active_col);
+  }
+  drawStr(bx + 17, by, sigBuf);
 }
 
 void TapUI::drawTabBar() {
@@ -1481,33 +1561,49 @@ void TapUI::drawChatMessagesOnly() {
     return;
   }
 
-  // Clamp _chat_scroll_offset
-  int maxScroll = (matchCount > 4) ? (matchCount - 4) : 0;
-  if (_chat_scroll_offset > maxScroll) _chat_scroll_offset = maxScroll;
-  if (_chat_scroll_offset < 0) _chat_scroll_offset = 0;
+  // Format and wrap messages into line items
+  _total_chat_lines = 0;
+  int startMsg = 0;
+  if (matchCount > 40) {
+    startMsg = matchCount - 40;
+  }
 
-  int endIdx = matchCount - _chat_scroll_offset;
-  int startIdx = endIdx - 4;
-  if (startIdx < 0) startIdx = 0;
-
-  int y = 46;
-  for (int k = startIdx; k < endIdx; k++) {
+  for (int k = startMsg; k < matchCount; k++) {
     UIMessage* m = &_messages[_chat_match_indices[k]];
     bool wasUnread = m->unread;
     m->unread = false; // Mark read now that the user is viewing it
 
+    char prefix[32];
+    uint16_t lineCol;
     if (m->is_outgoing) {
-      _display->setColor(colTitle());
-      char line[50];
-      snprintf(line, sizeof(line), "You: %.40s", m->text);
-      drawStr(6, y, line);
+      strcpy(prefix, "You: ");
+      lineCol = colTitle();
     } else {
-      _display->setColor(wasUnread ? COLOR_GOLD_STAR : colText());
-      char line[50];
-      snprintf(line, sizeof(line), "%s%s: %.36s", wasUnread ? "*" : "", m->sender, m->text);
-      drawStr(6, y, line);
+      if (wasUnread) {
+        snprintf(prefix, sizeof(prefix), "*%s: ", m->sender);
+        lineCol = COLOR_GOLD_STAR;
+      } else {
+        snprintf(prefix, sizeof(prefix), "%s: ", m->sender);
+        lineCol = colText();
+      }
     }
-    y += 17;
+    formatAndWrapMessage(prefix, m->text, lineCol);
+  }
+
+  // Clamp _chat_scroll_offset (line-based offset)
+  int maxScroll = (_total_chat_lines > VISIBLE_CHAT_LINES) ? (_total_chat_lines - VISIBLE_CHAT_LINES) : 0;
+  if (_chat_scroll_offset > maxScroll) _chat_scroll_offset = maxScroll;
+  if (_chat_scroll_offset < 0) _chat_scroll_offset = 0;
+
+  int endLine = _total_chat_lines - _chat_scroll_offset;
+  int startLine = endLine - VISIBLE_CHAT_LINES;
+  if (startLine < 0) startLine = 0;
+
+  int y = 46;
+  for (int l = startLine; l < endLine; l++) {
+    _display->setColor(_chat_lines[l].color);
+    drawStr(6, y, _chat_lines[l].text);
+    y += CHAT_LINE_HEIGHT;
   }
 
   // Right-side Scroll Bar & Controls (X in 280..318, Y in 45..115)
@@ -1518,11 +1614,17 @@ void TapUI::drawChatMessagesOnly() {
   _display->setColor(_chat_scroll_offset < maxScroll ? colText() : colMutedText());
   drawStr(288, 52, "UP ^");
 
-  // Middle indicator (shows e.g. "5-8/12" or "ALL")
+  // Middle indicator (shows e.g. "6/12" or "ALL")
   char posBuf[12];
-  snprintf(posBuf, sizeof(posBuf), "%d/%d", endIdx, matchCount);
-  _display->setColor(colSubText());
-  drawStr(282, 76, posBuf);
+  if (_total_chat_lines <= VISIBLE_CHAT_LINES) {
+    strcpy(posBuf, "ALL");
+    _display->setColor(colSubText());
+    drawStr(290, 76, posBuf);
+  } else {
+    snprintf(posBuf, sizeof(posBuf), "%d/%d", endLine, _total_chat_lines);
+    _display->setColor(colSubText());
+    drawStr(282, 76, posBuf);
+  }
 
   _display->setColor(colCardBg());
   _display->fillRect(280, 93, 38, 22);
@@ -1530,6 +1632,118 @@ void TapUI::drawChatMessagesOnly() {
   _display->drawRect(280, 93, 38, 22);
   _display->setColor(_chat_scroll_offset > 0 ? colText() : colMutedText());
   drawStr(288, 100, "DN v");
+}
+
+void TapUI::formatAndWrapMessage(const char* prefix, const char* text, uint16_t color) {
+  if (!text) return;
+  const int MAX_LINE_CHARS = 44;
+  char curLine[48];
+  int curLen = 0;
+
+  // Add prefix to first line
+  if (prefix) {
+    while (*prefix && curLen < MAX_LINE_CHARS) {
+      curLine[curLen++] = *prefix++;
+    }
+  }
+
+  const char* p = text;
+  while (*p && _total_chat_lines < MAX_CHAT_LINES) {
+    if (*p == '\r') {
+      p++;
+      continue;
+    }
+    if (*p == '\n') {
+      // End current line and start a new indented line
+      curLine[curLen] = '\0';
+      if (_total_chat_lines < MAX_CHAT_LINES) {
+        strncpy(_chat_lines[_total_chat_lines].text, curLine, sizeof(_chat_lines[0].text) - 1);
+        _chat_lines[_total_chat_lines].text[sizeof(_chat_lines[0].text) - 1] = '\0';
+        _chat_lines[_total_chat_lines].color = color;
+        _total_chat_lines++;
+      }
+      curLen = 0;
+      curLine[curLen++] = ' ';
+      curLine[curLen++] = ' ';
+      p++;
+      continue;
+    }
+
+    // Skip leading spaces if at start of line
+    if (curLen == 0 || (curLen == 2 && curLine[0] == ' ' && curLine[1] == ' ')) {
+      while (*p == ' ') p++;
+      if (!*p) break;
+    }
+
+    // Identify next word
+    const char* wordStart = p;
+    while (*p && *p != ' ' && *p != '\n' && *p != '\r') {
+      p++;
+    }
+    int wordLen = p - wordStart;
+    if (wordLen == 0) continue;
+
+    // Check if we need a space separator before this word
+    int needed = wordLen + ((curLen > 0 && curLine[curLen - 1] != ' ') ? 1 : 0);
+
+    if (curLen + needed <= MAX_LINE_CHARS) {
+      if (curLen > 0 && curLine[curLen - 1] != ' ') {
+        curLine[curLen++] = ' ';
+      }
+      memcpy(&curLine[curLen], wordStart, wordLen);
+      curLen += wordLen;
+    } else {
+      // Word does not fit on current line: flush current line if not empty
+      if (curLen > 0) {
+        curLine[curLen] = '\0';
+        if (_total_chat_lines < MAX_CHAT_LINES) {
+          strncpy(_chat_lines[_total_chat_lines].text, curLine, sizeof(_chat_lines[0].text) - 1);
+          _chat_lines[_total_chat_lines].text[sizeof(_chat_lines[0].text) - 1] = '\0';
+          _chat_lines[_total_chat_lines].color = color;
+          _total_chat_lines++;
+        }
+      }
+      // Start next line with indent
+      curLen = 0;
+      curLine[curLen++] = ' ';
+      curLine[curLen++] = ' ';
+
+      // If word itself is longer than MAX_LINE_CHARS - 2 (42 chars), chunk it
+      const char* w = wordStart;
+      int rem = wordLen;
+      while (rem > (MAX_LINE_CHARS - curLen) && _total_chat_lines < MAX_CHAT_LINES) {
+        int chunk = MAX_LINE_CHARS - curLen;
+        memcpy(&curLine[curLen], w, chunk);
+        curLen += chunk;
+        curLine[curLen] = '\0';
+        strncpy(_chat_lines[_total_chat_lines].text, curLine, sizeof(_chat_lines[0].text) - 1);
+        _chat_lines[_total_chat_lines].text[sizeof(_chat_lines[0].text) - 1] = '\0';
+        _chat_lines[_total_chat_lines].color = color;
+        _total_chat_lines++;
+
+        w += chunk;
+        rem -= chunk;
+        curLen = 0;
+        curLine[curLen++] = ' ';
+        curLine[curLen++] = ' ';
+      }
+      if (rem > 0 && curLen + rem <= MAX_LINE_CHARS) {
+        memcpy(&curLine[curLen], w, rem);
+        curLen += rem;
+      }
+    }
+
+    if (*p == ' ') p++;
+  }
+
+  // Flush any remaining characters on current line
+  if (curLen > 0 && _total_chat_lines < MAX_CHAT_LINES) {
+    curLine[curLen] = '\0';
+    strncpy(_chat_lines[_total_chat_lines].text, curLine, sizeof(_chat_lines[0].text) - 1);
+    _chat_lines[_total_chat_lines].text[sizeof(_chat_lines[0].text) - 1] = '\0';
+    _chat_lines[_total_chat_lines].color = color;
+    _total_chat_lines++;
+  }
 }
 
 void TapUI::drawTextInputBar() {
@@ -1669,13 +1883,13 @@ void TapUI::handleChatTouch(uint16_t tx, uint16_t ty) {
   // Scroll Up / Down buttons in chat area: X in 276..319, Y in 44..116
   if (_edit_mode == EDIT_NONE && tx >= 276 && ty >= 44 && ty <= 116) {
     if (ty <= 74) {
-      // UP (older messages)
-      _chat_scroll_offset += 2;
+      // UP (older lines)
+      _chat_scroll_offset += 3;
       _needs_chat_messages_redraw = true;
       return;
     } else if (ty >= 88) {
-      // DN (newer messages)
-      _chat_scroll_offset -= 2;
+      // DN (newer lines)
+      _chat_scroll_offset -= 3;
       if (_chat_scroll_offset < 0) _chat_scroll_offset = 0;
       _needs_chat_messages_redraw = true;
       return;
