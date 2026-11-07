@@ -1192,12 +1192,7 @@ void TapUI::update() {
       uint16_t ty = pt.y;
 
       if (ty < 20) {
-        if (tx >= 240) {
-          // Top-right tap toggles RSSI (dBm) vs SNR (dB) readout
-          _sig_show_snr = !_sig_show_snr;
-          drawStatusBar();
-          return;
-        }
+        return; // Ignore taps on status bar
       } else if (ty >= 20 && ty <= 42) {
         handleTabTouch(tx, ty);
       } else {
@@ -1251,15 +1246,32 @@ void TapUI::drawStatusBar() {
   _display->setColor(_dark_mode ? COLOR_DARK_HDR : COLOR_NAVY);
   _display->fillRect(0, 0, 320, 20);
 
-  _display->setTextSize(1);
-  _display->setColor(COLOR_WHITE);
+  // 1. Top-Left Signal Strength Indicator (Bars only, X = 4..17)
+  bool sig_recent = (_last_rx_packet_count > 0) && (millis() - _last_rx_packet_ms < 180000UL);
+  drawSignalBars(4, 5, _last_rx_rssi, _last_rx_snr, sig_recent);
 
-  // 1. Left: Active Target (X = 3..52, max 8 chars)
-  char recBuf[12];
+  // 2. Top-Left Battery Icon (Icon only, X = 22..38)
+  uint16_t mv = board.getBattMilliVolts();
+  uint8_t pct = calcBatteryPercent(mv);
+  uint16_t batCol = (pct > 40) ? COLOR_GREEN_BTN : ((pct > 18) ? COLOR_ORANGE_BTN : COLOR_RED_BTN);
+
+  _display->setColor(COLOR_WHITE);
+  _display->drawRect(22, 5, 15, 10);
+  _display->fillRect(37, 8, 2, 4);
+  int fillW = (pct * 11) / 100;
+  if (fillW > 0) {
+    _display->setColor(batCol);
+    _display->fillRect(24, 7, fillW, 6);
+  }
+
+  _display->setTextSize(1);
+
+  // 3. Active Target (X = 46)
+  char recBuf[16];
   if (_active_contact_idx >= 0) {
     ContactInfo c;
     if (the_mesh.getContactByIdx(_active_contact_idx, c)) {
-      if (c.name[0] != 0) snprintf(recBuf, sizeof(recBuf), "@%.7s", c.name);
+      if (c.name[0] != 0) snprintf(recBuf, sizeof(recBuf), "@%.10s", c.name);
       else snprintf(recBuf, sizeof(recBuf), "@!%02X%02X", c.id.pub_key[0], c.id.pub_key[1]);
     } else {
       strcpy(recBuf, "@Node");
@@ -1267,77 +1279,54 @@ void TapUI::drawStatusBar() {
   } else {
     ChannelDetails ch;
     if (the_mesh.getChannel(_active_channel, ch)) {
-      if (ch.name[0] == '#') snprintf(recBuf, sizeof(recBuf), "%.8s", ch.name);
-      else snprintf(recBuf, sizeof(recBuf), "#%.7s", ch.name[0] ? ch.name : "Public");
+      if (ch.name[0] == '#') snprintf(recBuf, sizeof(recBuf), "%.10s", ch.name);
+      else snprintf(recBuf, sizeof(recBuf), "#%.9s", ch.name[0] ? ch.name : "Public");
     } else {
       strcpy(recBuf, "#Public");
     }
   }
-  drawStr(3, 5, recBuf);
+  _display->setColor(COLOR_WHITE);
+  drawStr(46, 5, recBuf);
 
-  // 2. BLE Status / PIN (X = 55..104)
+  // 4. BLE Status / PIN (X = 126)
   if (!_ble_enabled) {
     _display->setColor(COLOR_MED_GRAY);
-    drawStr(55, 5, "BT:OFF");
+    drawStr(126, 5, "BT:OFF");
   } else if (ui_task.hasConnection()) {
     _display->setColor(COLOR_GREEN_BTN);
-    drawStr(55, 5, "BT:CONN");
+    drawStr(126, 5, "BT:CONN");
   } else if (the_mesh.getBLEPin() != 0) {
     char pinBuf[12];
     snprintf(pinBuf, sizeof(pinBuf), "P:%06lu", (unsigned long)the_mesh.getBLEPin());
     _display->setColor(COLOR_ORANGE_BTN);
-    drawStr(55, 5, pinBuf);
+    drawStr(126, 5, pinBuf);
   } else {
     _display->setColor(COLOR_GREEN_BTN);
-    drawStr(55, 5, "BT:ON");
+    drawStr(126, 5, "BT:ON");
   }
 
-  // 3. GPS Status (X = 107..130)
+  // 5. GPS Status (X = 196)
   LocationProvider* loc = sensors.getLocationProvider();
   if (loc && loc->isEnabled()) {
     if (loc->isValid()) {
       char gpsBuf[10];
       snprintf(gpsBuf, sizeof(gpsBuf), "G:%ld", loc->satellitesCount());
       _display->setColor(COLOR_GREEN_BTN);
-      drawStr(107, 5, gpsBuf);
+      drawStr(196, 5, gpsBuf);
     } else {
       _display->setColor(COLOR_ORANGE_BTN);
-      drawStr(107, 5, "G:..");
+      drawStr(196, 5, "G:..");
     }
   } else {
     _display->setColor(COLOR_MED_GRAY);
-    drawStr(107, 5, "G:--");
+    drawStr(196, 5, "G:--");
   }
 
-  // 4. Clock HH:MM (X = 134..164)
+  // 6. Clock HH:MM (anchored to right edge X = 316)
   char clkBuf[10];
   formatLocalDateTime(clkBuf, sizeof(clkBuf), false, false);
   _display->setColor(COLOR_WHITE);
-  drawStr(134, 5, clkBuf);
-
-  // 5. Battery Icon + Percentage + Voltage (X = 168..240)
-  uint16_t mv = board.getBattMilliVolts();
-  uint8_t pct = calcBatteryPercent(mv);
-  uint16_t batCol = (pct > 40) ? COLOR_GREEN_BTN : ((pct > 18) ? COLOR_ORANGE_BTN : COLOR_RED_BTN);
-
-  // Draw battery outline (14x9 at x=168, y=5) + positive terminal nub (2x5 at x=182, y=7)
-  _display->setColor(COLOR_WHITE);
-  _display->drawRect(168, 5, 14, 9);
-  _display->fillRect(182, 7, 2, 5);
-  int fillW = (pct * 10) / 100;
-  if (fillW > 0) {
-    _display->setColor(batCol);
-    _display->fillRect(170, 7, fillW, 5);
-  }
-
-  char batBuf[18];
-  snprintf(batBuf, sizeof(batBuf), "%u%% %.1fV", pct, (float)mv / 1000.0f);
-  _display->setColor(batCol);
-  drawStr(187, 5, batBuf);
-
-  // 6. Signal Strength Indicator on Top Right (X = 246..318)
-  bool sig_recent = (_last_rx_packet_count > 0) && (millis() - _last_rx_packet_ms < 180000UL);
-  drawSignalBars(246, 5, _last_rx_rssi, _last_rx_snr, sig_recent);
+  _display->drawTextRightAlign(316, 5, clkBuf);
 }
 
 void TapUI::drawSignalBars(int bx, int by, float rssi, float snr, bool recent) {
@@ -1375,20 +1364,6 @@ void TapUI::drawSignalBars(int bx, int by, float rssi, float snr, bool recent) {
       _display->drawRect(x, y, 2, h);
     }
   }
-
-  // Live dBm / SNR readout text beside bars
-  char sigBuf[12];
-  if (!recent) {
-    strcpy(sigBuf, "--dB");
-    _display->setColor(COLOR_MED_GRAY);
-  } else if (_sig_show_snr) {
-    snprintf(sigBuf, sizeof(sigBuf), "%+ddB", (int)snr);
-    _display->setColor(active_col);
-  } else {
-    snprintf(sigBuf, sizeof(sigBuf), "%ddB", (int)rssi);
-    _display->setColor(active_col);
-  }
-  drawStr(bx + 17, by, sigBuf);
 }
 
 void TapUI::drawTabBar() {
