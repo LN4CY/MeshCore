@@ -185,6 +185,8 @@ TapUI::TapUI()
     _showing_splash(false),
     _splash_start_ms(0),
     _last_splash_draw_ms(0),
+    _last_splash_sec(-1),
+    _last_splash_fill_w(0),
     _text_len(0),
     _nodes_page(0),
     _gps_baud(9600),
@@ -348,6 +350,8 @@ bool TapUI::begin(DisplayDriver* display) {
   _showing_splash = true;
   _splash_start_ms = millis();
   _last_splash_draw_ms = 0;
+  _last_splash_sec = -1;
+  _last_splash_fill_w = 0;
   drawSplashScreen();
 
   _needs_full_redraw = false;
@@ -1162,6 +1166,10 @@ void TapUI::sendMessage(const char* text) {
 void TapUI::dismissSplashScreen() {
   _showing_splash = false;
   _last_activity_ms = millis();
+  if (_display) {
+    _display->setColor(colBg());
+    _display->fillRect(0, 0, 320, 240);
+  }
   _needs_full_redraw = true;
 }
 
@@ -1250,6 +1258,8 @@ void TapUI::drawSplashScreen() {
   _display->setColor(COLOR_MUTED);
   _display->drawRect(35, 196, 250, 8);
 
+  _last_splash_sec = -1;
+  _last_splash_fill_w = 0;
   drawSplashProgress(0);
 }
 
@@ -1262,26 +1272,27 @@ void TapUI::drawSplashProgress(unsigned long elapsed) {
   int fillW = (int)((elapsed * 246UL) / SPLASH_DURATION_MS);
   if (fillW > 246) fillW = 246;
 
-  _display->setColor(COLOR_CYAN);
-  if (fillW > 0) {
-    _display->fillRect(37, 198, fillW, 4);
-  }
-  _display->setColor(COLOR_NAVY);
-  if (246 - fillW > 0) {
-    _display->fillRect(37 + fillW, 198, 246 - fillW, 4);
+  // Incremental fill of progress bar: never erase, only draw new pixels
+  if (fillW > _last_splash_fill_w) {
+    _display->setColor(COLOR_CYAN);
+    _display->fillRect(37 + _last_splash_fill_w, 198, fillW - _last_splash_fill_w, 4);
+    _last_splash_fill_w = fillW;
   }
 
-  // Update countdown text
-  char cd[48];
-  snprintf(cd, sizeof(cd), "Starting in %ds... (Tap or click to skip)", remaining_sec);
-  int tw = strlen(cd) * 6;
-  int tx = (320 - tw) / 2;
-  if (tx < 10) tx = 10;
-  _display->setColor(COLOR_NAVY);
-  _display->fillRect(10, 212, 300, 12);
-  _display->setColor(COLOR_MUTED);
-  _display->setTextSize(1);
-  drawStr(tx, 212, cd);
+  // Update countdown text ONLY when remaining_sec actually ticks (once per second, zero flicker!)
+  if (remaining_sec != _last_splash_sec) {
+    _last_splash_sec = remaining_sec;
+    char cd[48];
+    snprintf(cd, sizeof(cd), "Starting in %ds... (Tap or click to skip)", remaining_sec);
+    int tw = strlen(cd) * 6;
+    int tx = (320 - tw) / 2;
+    if (tx < 10) tx = 10;
+    _display->setColor(COLOR_NAVY);
+    _display->fillRect(10, 212, 300, 12);
+    _display->setColor(COLOR_MUTED);
+    _display->setTextSize(1);
+    drawStr(tx, 212, cd);
+  }
 }
 
 void TapUI::update() {
@@ -1391,7 +1402,7 @@ void TapUI::update() {
     _needs_tabbar_redraw = false;
 
     _display->setColor(colBg());
-    _display->fillRect(0, 44, 320, 196);
+    _display->fillRect(0, 0, 320, 240);
 
     drawStatusBar();
     drawTabBar();
@@ -1683,7 +1694,7 @@ void TapUI::drawChatMessagesOnly() {
 
   int matchCount = 0;
 
-  for (int i = 0; i < _msg_count; i++) {
+  for (int i = 0; i < _msg_count && matchCount < MAX_UI_MESSAGES; i++) {
     UIMessage* m = &_messages[i];
     if (_active_contact_idx >= 0 && hasActiveContact) {
       if (m->is_direct) {
@@ -1813,12 +1824,14 @@ void TapUI::formatAndWrapMessage(const char* prefix, const char* text, uint16_t 
 
   const char* p = text;
   while (*p && _total_chat_lines < MAX_CHAT_LINES) {
+    // Skip carriage returns
     if (*p == '\r') {
       p++;
       continue;
     }
+
+    // Newlines: flush current line and start a new indented line
     if (*p == '\n') {
-      // End current line and start a new indented line
       curLine[curLen] = '\0';
       if (_total_chat_lines < MAX_CHAT_LINES) {
         strncpy(_chat_lines[_total_chat_lines].text, curLine, sizeof(_chat_lines[0].text) - 1);
@@ -1833,19 +1846,28 @@ void TapUI::formatAndWrapMessage(const char* prefix, const char* text, uint16_t 
       continue;
     }
 
-    // Skip leading spaces if at start of line
-    if (curLen == 0 || (curLen == 2 && curLine[0] == ' ' && curLine[1] == ' ')) {
+    // Skip spaces (always advances p to guarantee loop termination)
+    if (*p == ' ') {
       while (*p == ' ') p++;
-      if (!*p) break;
+      continue;
+    }
+
+    // Skip non-printable control characters (< 32)
+    if ((unsigned char)*p < 32) {
+      p++;
+      continue;
     }
 
     // Identify next word
     const char* wordStart = p;
-    while (*p && *p != ' ' && *p != '\n' && *p != '\r') {
+    while (*p && (unsigned char)*p > 32) {
       p++;
     }
     int wordLen = p - wordStart;
-    if (wordLen == 0) continue;
+    if (wordLen <= 0) {
+      if (*p) p++;
+      continue;
+    }
 
     // Check if we need a space separator before this word
     int needed = wordLen + ((curLen > 0 && curLine[curLen - 1] != ' ') ? 1 : 0);
@@ -1896,8 +1918,6 @@ void TapUI::formatAndWrapMessage(const char* prefix, const char* text, uint16_t 
         curLen += rem;
       }
     }
-
-    if (*p == ' ') p++;
   }
 
   // Flush any remaining characters on current line

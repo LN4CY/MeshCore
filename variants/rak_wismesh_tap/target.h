@@ -88,8 +88,20 @@ public:
   bool isGpsActive() const { return gps_active; }
 };
 
+#include <helpers/ui/ST7789LCDDisplay.h>
+
+class TapDisplay : public ST7789LCDDisplay {
+public:
+  TapDisplay(RefCountedDigitalPin* peripher_power = NULL) : ST7789LCDDisplay(peripher_power) {}
+  void startFrame(ColorVal bkg = 0) override {
+    // Suppress legacy white "WisMesh Tap / MeshCore Booting..." boot screen from main.cpp
+  }
+  void endFrame() override {
+    // Suppress legacy boot screen from main.cpp
+  }
+};
+
 #ifdef DISPLAY_CLASS
-  #include <helpers/ui/ST7789LCDDisplay.h>
   extern DISPLAY_CLASS display;
   #include <helpers/ui/MomentaryButton.h>
   extern MomentaryButton user_btn;

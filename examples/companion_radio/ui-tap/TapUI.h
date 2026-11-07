@@ -148,6 +148,8 @@ private:
   bool _showing_splash;
   unsigned long _splash_start_ms;
   unsigned long _last_splash_draw_ms;
+  int _last_splash_sec;
+  int _last_splash_fill_w;
   static const unsigned long SPLASH_DURATION_MS = 10000UL;
 
   // Persistent sorted contact list buffer (avoids 2.6 KB stack allocations in FreeRTOS loop task!)
