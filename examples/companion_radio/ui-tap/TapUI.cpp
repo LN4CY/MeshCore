@@ -175,6 +175,7 @@ TapUI::TapUI()
     _last_rx_rssi(-128.0f),
     _last_rx_snr(0.0f),
     _sig_show_snr(false),
+    _last_is_charging(false),
     _text_len(0),
     _nodes_page(0),
     _gps_baud(9600),
@@ -1170,6 +1171,15 @@ void TapUI::update() {
     }
   }
 
+  // Monitor charging status (instant redraw on plug/unplug)
+  bool is_chg = board.isExternalPowered();
+  if (is_chg != _last_is_charging) {
+    _last_is_charging = is_chg;
+    if (!_is_screen_sleeping && !_needs_full_redraw) {
+      drawStatusBar();
+    }
+  }
+
   // Flicker-free partial refresh when viewing the GPS tab (only redraws card interior when values change)
   if (!_is_screen_sleeping && _current_tab == TAB_GPS && !_needs_full_redraw && (now - _last_gps_ui_refresh_ms > 3000UL)) {
     _last_gps_ui_refresh_ms = now;
@@ -1253,7 +1263,8 @@ void TapUI::drawStatusBar() {
   // 2. Top-Left Battery Icon (Icon only, X = 22..38)
   uint16_t mv = board.getBattMilliVolts();
   uint8_t pct = calcBatteryPercent(mv);
-  uint16_t batCol = (pct > 40) ? COLOR_GREEN_BTN : ((pct > 18) ? COLOR_ORANGE_BTN : COLOR_RED_BTN);
+  bool is_charging = board.isExternalPowered();
+  uint16_t batCol = is_charging ? COLOR_GREEN_BTN : ((pct > 40) ? COLOR_GREEN_BTN : ((pct > 18) ? COLOR_ORANGE_BTN : COLOR_RED_BTN));
 
   _display->setColor(COLOR_WHITE);
   _display->drawRect(22, 5, 15, 10);
@@ -1262,6 +1273,16 @@ void TapUI::drawStatusBar() {
   if (fillW > 0) {
     _display->setColor(batCol);
     _display->fillRect(24, 7, fillW, 6);
+  }
+
+  // When charging, draw sharp lightning bolt in center of battery
+  if (is_charging) {
+    _display->setColor(COLOR_GOLD_STAR);
+    _display->fillRect(29, 6, 2, 2); // top segment
+    _display->fillRect(28, 7, 2, 2); // upper slant
+    _display->fillRect(26, 9, 7, 1); // center crossbar
+    _display->fillRect(29, 10, 2, 2); // lower slant
+    _display->fillRect(28, 11, 2, 2); // bottom tip
   }
 
   _display->setTextSize(1);

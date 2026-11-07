@@ -140,6 +140,7 @@ private:
   float _last_rx_rssi;
   float _last_rx_snr;
   bool _sig_show_snr;
+  bool _last_is_charging;
 
   // Persistent sorted contact list buffer (avoids 2.6 KB stack allocations in FreeRTOS loop task!)
   DiscoveredNodeItem _sorted_nodes[MAX_SORTED_NODES];
