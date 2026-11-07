@@ -839,6 +839,10 @@ void TapUI::cycleTab() {
   _current_tab = (TapTab)next;
   _edit_mode = EDIT_NONE;
   _editing_chan_idx = -1;
+  _kb_visible = false;
+  if (_current_tab == TAB_CHAT) {
+    jumpToOldestUnread();
+  }
   _needs_full_redraw = true;
 }
 
@@ -1700,15 +1704,67 @@ void TapUI::drawTabBar() {
   }
 }
 
+bool TapUI::jumpToOldestUnread() {
+  int oldest_unread_idx = -1;
+  for (int i = 0; i < _msg_count; i++) {
+    if (_messages[i].unread) {
+      oldest_unread_idx = i;
+      break;
+    }
+  }
+
+  if (oldest_unread_idx < 0) return false;
+
+  const UIMessage& unread_m = _messages[oldest_unread_idx];
+  if (unread_m.is_direct) {
+    int contact_slot = -1;
+    int total_slots = the_mesh.getTotalContactSlots();
+    ContactInfo c;
+    for (int s = 8; s < total_slots; s++) {
+      if (the_mesh.getContactByIdx(s, c) && c.type != 0) {
+        if (memcmp(c.id.pub_key, unread_m.contact_pubkey, 4) == 0 ||
+            (unread_m.sender[0] && strcmp(c.name, unread_m.sender) == 0)) {
+          contact_slot = s;
+          break;
+        }
+      }
+    }
+    if (contact_slot >= 0) {
+      _active_contact_idx = contact_slot;
+      _chat_scroll_offset = 0;
+      return true;
+    }
+  } else {
+    _active_channel = unread_m.channel_idx;
+    _active_contact_idx = -1;
+    _chat_scroll_offset = 0;
+    return true;
+  }
+  return false;
+}
+
 void TapUI::handleTabTouch(uint16_t tx, uint16_t ty) {
   int tabIdx = tx / 64;
   if (tabIdx >= 0 && tabIdx <= 4) {
-    if (_current_tab != (TapTab)tabIdx) {
-      _current_tab = (TapTab)tabIdx;
-      _edit_mode = EDIT_NONE;
-      _editing_chan_idx = -1;
-      _kb_visible = false;
-      _needs_full_redraw = true;
+    if (tabIdx == (int)TAB_CHAT) {
+      // Shortcut: When tapping CHAT tab, check if there are unread messages.
+      // Jump directly to the channel/conversation with the oldest unread message.
+      bool jumped = jumpToOldestUnread();
+      if (_current_tab != TAB_CHAT || jumped || _edit_mode != EDIT_NONE || _kb_visible) {
+        _current_tab = TAB_CHAT;
+        _edit_mode = EDIT_NONE;
+        _editing_chan_idx = -1;
+        _kb_visible = false;
+        _needs_full_redraw = true;
+      }
+    } else {
+      if (_current_tab != (TapTab)tabIdx) {
+        _current_tab = (TapTab)tabIdx;
+        _edit_mode = EDIT_NONE;
+        _editing_chan_idx = -1;
+        _kb_visible = false;
+        _needs_full_redraw = true;
+      }
     }
   }
 }
