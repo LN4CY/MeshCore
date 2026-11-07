@@ -141,6 +141,14 @@ private:
   float _last_rx_snr;
   bool _sig_show_snr;
   bool _last_is_charging;
+  unsigned long _last_pwr_check_ms;
+  unsigned long _last_gps_sync_ms;
+
+  // Boot splash screen state
+  bool _showing_splash;
+  unsigned long _splash_start_ms;
+  unsigned long _last_splash_draw_ms;
+  static const unsigned long SPLASH_DURATION_MS = 10000UL;
 
   // Persistent sorted contact list buffer (avoids 2.6 KB stack allocations in FreeRTOS loop task!)
   DiscoveredNodeItem _sorted_nodes[MAX_SORTED_NODES];
@@ -194,6 +202,9 @@ private:
 
   void drawStatusBar();
   void drawSignalBars(int bx, int by, float rssi, float snr, bool recent);
+  void drawSplashScreen();
+  void drawSplashProgress(unsigned long elapsed);
+  void drawMeshCoreLogo2x(int startX, int startY, uint16_t color);
   void drawTabBar();
   void drawChatScreen();
   void drawChatMessagesOnly();
@@ -241,6 +252,9 @@ public:
 
   bool begin(DisplayDriver* display);
   void update();
+  bool isShowingSplash() const { return _showing_splash; }
+  void dismissSplashScreen();
+  bool isScreenSleeping() const { return _is_screen_sleeping; }
 
   // Settings persistence
   void loadDeviceSettings();

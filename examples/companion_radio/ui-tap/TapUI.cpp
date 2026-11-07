@@ -14,6 +14,7 @@ extern unsigned int decode_base64(const unsigned char input[], unsigned int inpu
 #include <helpers/nrf52/SerialBLEInterface.h>
 extern SerialBLEInterface bluetooth_interface;
 #endif
+#include "icons.h"
 #include "UITask.h"
 
 using namespace Adafruit_LittleFS_Namespace;
@@ -39,6 +40,9 @@ extern DataStore store;
 #define COLOR_GOLD_STAR  0xFEA0
 #define COLOR_PURPLE_BTN 0x791B
 #define COLOR_CYAN_BTN   0x04F7
+#define COLOR_CYAN       0x07FF
+#define COLOR_MUTED      0x8410
+#define COLOR_DARK_LINE  0x4A49
 
 // Light mode Node Card Colors
 #define COLOR_CARD_CLIENT_BG   0xFFFF
@@ -176,6 +180,11 @@ TapUI::TapUI()
     _last_rx_snr(0.0f),
     _sig_show_snr(false),
     _last_is_charging(false),
+    _last_pwr_check_ms(0),
+    _last_gps_sync_ms(0),
+    _showing_splash(false),
+    _splash_start_ms(0),
+    _last_splash_draw_ms(0),
     _text_len(0),
     _nodes_page(0),
     _gps_baud(9600),
@@ -336,7 +345,12 @@ bool TapUI::begin(DisplayDriver* display) {
 
   restartGPS();
 
-  _needs_full_redraw = true;
+  _showing_splash = true;
+  _splash_start_ms = millis();
+  _last_splash_draw_ms = 0;
+  drawSplashScreen();
+
+  _needs_full_redraw = false;
   return true;
 }
 
@@ -1145,16 +1159,179 @@ void TapUI::sendMessage(const char* text) {
   addSentMessage(text);
 }
 
+void TapUI::dismissSplashScreen() {
+  _showing_splash = false;
+  _last_activity_ms = millis();
+  _needs_full_redraw = true;
+}
+
+void TapUI::drawMeshCoreLogo2x(int startX, int startY, uint16_t color) {
+  if (!_display) return;
+  _display->setColor(color);
+  const int w = 128;
+  const int h = 13;
+  const int byteWidth = 16;
+  for (int j = 0; j < h; j++) {
+    for (int i = 0; i < w; i++) {
+      uint8_t byte = meshcore_logo[j * byteWidth + i / 8];
+      bool pixelOn = byte & (0x80 >> (i & 7));
+      if (pixelOn) {
+        _display->fillRect(startX + i * 2, startY + j * 2, 2, 2);
+      }
+    }
+  }
+}
+
+void TapUI::drawSplashScreen() {
+  if (!_display) return;
+
+  _display->setColor(COLOR_NAVY);
+  _display->fillRect(0, 0, 320, 240);
+
+  // Top Title
+  _display->setColor(COLOR_CYAN);
+  _display->setTextSize(1);
+  drawStr(74, 18, "*** OFF-GRID LORA MESH ***");
+
+  // Scaled 2x MESHCORE Logo (128x13 -> 256x26) centered at X = 32, Y = 38
+  drawMeshCoreLogo2x(32, 38, COLOR_WHITE);
+
+  // Subtitle
+  _display->setColor(COLOR_MUTED);
+  _display->setTextSize(1);
+  drawStr(52, 70, "STANDALONE TACTICAL COMMUNICATOR");
+
+  // Divider
+  _display->setColor(COLOR_DARK_LINE);
+  _display->fillRect(20, 84, 280, 1);
+
+  // Node Name (Large Green Text)
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  const char* node_name = (prefs && prefs->node_name[0]) ? prefs->node_name : "MeshNode";
+  _display->setTextSize(2);
+  _display->setColor(COLOR_GREEN_BTN);
+  int nameW = strlen(node_name) * 12;
+  int nameX = (320 - nameW) / 2;
+  if (nameX < 10) nameX = 10;
+  drawStr(nameX, 94, node_name);
+
+  // Info Items
+  _display->setTextSize(1);
+  _display->setColor(COLOR_WHITE);
+
+  char lineBuf[52];
+  snprintf(lineBuf, sizeof(lineBuf), "LoRa: %0.3f MHz  SF%d / BW%0.1f", _radio_freq, _radio_sf, _radio_bw);
+  int l1W = strlen(lineBuf) * 6;
+  drawStr((320 - l1W) / 2, 122, lineBuf);
+
+  uint32_t pin = (prefs && prefs->ble_pin != 0) ? prefs->ble_pin : 123456;
+  snprintf(lineBuf, sizeof(lineBuf), "Bluetooth: %s  (PIN: %06lu)", _ble_enabled ? "Active" : "Off", (unsigned long)pin);
+  int l2W = strlen(lineBuf) * 6;
+  drawStr((320 - l2W) / 2, 138, lineBuf);
+
+  uint16_t mv = board.getBattMilliVolts();
+  uint8_t pct = calcBatteryPercent(mv);
+  bool is_chg = board.isExternalPowered();
+  snprintf(lineBuf, sizeof(lineBuf), "Power: %d.%02dV (%d%%)%s  |  GPS: %s",
+           mv / 1000, (mv % 1000) / 10, pct, is_chg ? " [CHG]" : "", "Active");
+  int l3W = strlen(lineBuf) * 6;
+  drawStr((320 - l3W) / 2, 154, lineBuf);
+
+  _display->setColor(COLOR_MUTED);
+  const char* verStr = "WisMesh Tap Standalone Edition";
+  int vW = strlen(verStr) * 6;
+  drawStr((320 - vW) / 2, 170, verStr);
+
+  // Bottom Divider
+  _display->setColor(COLOR_DARK_LINE);
+  _display->fillRect(20, 186, 280, 1);
+
+  // Progress Bar Outline (X = 35..285, W = 250, H = 8)
+  _display->setColor(COLOR_MUTED);
+  _display->drawRect(35, 196, 250, 8);
+
+  drawSplashProgress(0);
+}
+
+void TapUI::drawSplashProgress(unsigned long elapsed) {
+  if (!_display) return;
+  int remaining_sec = (int)((SPLASH_DURATION_MS - elapsed + 999) / 1000UL);
+  if (remaining_sec < 0) remaining_sec = 0;
+
+  // Progress fill: interior width = 246
+  int fillW = (int)((elapsed * 246UL) / SPLASH_DURATION_MS);
+  if (fillW > 246) fillW = 246;
+
+  _display->setColor(COLOR_CYAN);
+  if (fillW > 0) {
+    _display->fillRect(37, 198, fillW, 4);
+  }
+  _display->setColor(COLOR_NAVY);
+  if (246 - fillW > 0) {
+    _display->fillRect(37 + fillW, 198, 246 - fillW, 4);
+  }
+
+  // Update countdown text
+  char cd[48];
+  snprintf(cd, sizeof(cd), "Starting in %ds... (Tap or click to skip)", remaining_sec);
+  int tw = strlen(cd) * 6;
+  int tx = (320 - tw) / 2;
+  if (tx < 10) tx = 10;
+  _display->setColor(COLOR_NAVY);
+  _display->fillRect(10, 212, 300, 12);
+  _display->setColor(COLOR_MUTED);
+  _display->setTextSize(1);
+  drawStr(tx, 212, cd);
+}
+
 void TapUI::update() {
   if (!_display) return;
 
   unsigned long now = millis();
 
-  // Keep MeshCore sensors.node_lat/node_lon and prefs->node_lat/node_lon synced with live GPS fix
-  syncGPSWithMesh();
+  // Boot splash screen handler
+  if (_showing_splash) {
+    unsigned long elapsed = now - _splash_start_ms;
+    if (elapsed >= SPLASH_DURATION_MS) {
+      dismissSplashScreen();
+    } else {
+      TouchPoint pt;
+      _touch.poll(pt);
+      if (pt.isPressed || pt.justPressed) {
+        dismissSplashScreen();
+        return;
+      }
+      if (now - _last_splash_draw_ms >= 50UL) {
+        _last_splash_draw_ms = now;
+        drawSplashProgress(elapsed);
+      }
+      return;
+    }
+  }
 
-  // Screen sleep inactivity timer
-  if (_screen_sleep_seconds > 0 && !_is_screen_sleeping && (now - _last_activity_ms > _screen_sleep_seconds * 1000UL)) {
+  // Rate-limited GPS coordinate synchronization (once every 1500ms)
+  if (now - _last_gps_sync_ms >= 1500UL) {
+    _last_gps_sync_ms = now;
+    syncGPSWithMesh();
+  }
+
+  // Rate-limited charging status check (once every 2000ms)
+  // Prevents thousands of SoftDevice SVC supervisor calls per second that cause loop_task hangs!
+  if (now - _last_pwr_check_ms >= 2000UL) {
+    _last_pwr_check_ms = now;
+    bool is_chg = board.isExternalPowered();
+    if (is_chg != _last_is_charging) {
+      _last_is_charging = is_chg;
+      if (!_is_screen_sleeping && !_needs_full_redraw) {
+        drawStatusBar();
+      }
+    }
+  }
+
+  // Screen sleep inactivity timer: only sleep when running on battery!
+  // When plugged into external power / USB charging, remain awake as a desk companion.
+  if (_screen_sleep_seconds > 0 && !_is_screen_sleeping && !_last_is_charging &&
+      (now - _last_activity_ms > _screen_sleep_seconds * 1000UL)) {
     _is_screen_sleeping = true;
     board.setBacklight(false);
   }
@@ -1171,15 +1348,6 @@ void TapUI::update() {
     }
   }
 
-  // Monitor charging status (instant redraw on plug/unplug)
-  bool is_chg = board.isExternalPowered();
-  if (is_chg != _last_is_charging) {
-    _last_is_charging = is_chg;
-    if (!_is_screen_sleeping && !_needs_full_redraw) {
-      drawStatusBar();
-    }
-  }
-
   // Flicker-free partial refresh when viewing the GPS tab (only redraws card interior when values change)
   if (!_is_screen_sleeping && _current_tab == TAB_GPS && !_needs_full_redraw && (now - _last_gps_ui_refresh_ms > 3000UL)) {
     _last_gps_ui_refresh_ms = now;
@@ -1189,15 +1357,15 @@ void TapUI::update() {
   TouchPoint pt;
   _touch.poll(pt);
   _touch_is_down = pt.isPressed;
-  {
+  if (pt.isPressed || pt.justPressed) {
+    _last_activity_ms = now;
+
+    if (_is_screen_sleeping) {
+      wakeScreen();
+      return;
+    }
+
     if (pt.justPressed) {
-      _last_activity_ms = now;
-
-      if (_is_screen_sleeping) {
-        wakeScreen();
-        return;
-      }
-
       uint16_t tx = pt.x;
       uint16_t ty = pt.y;
 

@@ -126,10 +126,23 @@ bool UITask::onUnhandledResponse(const ContactInfo &from, uint32_t tag, const ui
 }
 
 void UITask::loop() {
+  int raw_btn = digitalRead(user_btn.getPin());
+
+  // Instant splash dismiss or screen wakeup on physical button press
+  if (_ui.isShowingSplash() && raw_btn == LOW) {
+    _ui.dismissSplashScreen();
+    user_btn.cancelClick();
+    return;
+  }
+  if (_ui.isScreenSleeping() && raw_btn == LOW) {
+    _ui.wakeScreen();
+    user_btn.cancelClick();
+    return;
+  }
+
   // Raw button transition debug logging on AIN1 (Pin 31)
   static int last_raw_btn = HIGH;
   static uint32_t raw_down_ms = 0;
-  int raw_btn = digitalRead(user_btn.getPin());
   if (raw_btn != last_raw_btn) {
     last_raw_btn = raw_btn;
     if (raw_btn == LOW) {
