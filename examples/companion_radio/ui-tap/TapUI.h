@@ -9,7 +9,7 @@
 #define MAX_MSG_TEXT_LEN 160
 #define MAX_SORTED_NODES 48
 #define MAX_CHAT_LINES 128
-#define VISIBLE_CHAT_LINES 6
+#define VISIBLE_CHAT_LINES 13
 #define CHAT_LINE_HEIGHT 12
 
 struct ChatLineItem {
@@ -92,6 +92,7 @@ private:
   TapTab _current_tab;
   TapTab _return_tab;
   KeyboardMode _kb_mode;
+  bool _kb_visible;
   TapEditMode _edit_mode;
   bool _needs_full_redraw;
   bool _needs_chat_messages_redraw;
@@ -210,7 +211,9 @@ private:
   void drawTabBar();
   void drawChatScreen();
   void drawChatMessagesOnly();
+  void drawChatInputPrompt();
   void formatAndWrapMessage(const char* prefix, const char* text, uint16_t color);
+  static void sanitizeUTF8String(char* dest, const char* src, size_t dest_size);
   void drawNodesScreen();
   void drawChansScreen();
   void drawChannelEditor();
@@ -257,6 +260,8 @@ public:
   bool isShowingSplash() const { return _showing_splash; }
   void dismissSplashScreen();
   bool isScreenSleeping() const { return _is_screen_sleeping; }
+  bool isKeyboardVisible() const { return _kb_visible; }
+  void setKeyboardVisible(bool vis);
 
   // Settings persistence
   void loadDeviceSettings();

@@ -148,6 +148,7 @@ TapUI::TapUI()
     _current_tab(TAB_CHAT),
     _return_tab(TAB_CHAT),
     _kb_mode(KB_LOWER),
+    _kb_visible(false),
     _edit_mode(EDIT_NONE),
     _needs_full_redraw(true),
     _needs_chat_messages_redraw(false),
@@ -1024,6 +1025,103 @@ void TapUI::applyAndSaveRadioParams() {
   showStatusNotification("Radio & Hash Mode Applied!");
 }
 
+void TapUI::setKeyboardVisible(bool vis) {
+  if (_kb_visible != vis) {
+    _kb_visible = vis;
+    _needs_full_redraw = true;
+  }
+}
+
+void TapUI::sanitizeUTF8String(char* dest, const char* src, size_t dest_size) {
+  if (!dest || dest_size == 0) return;
+  if (!src) {
+    dest[0] = 0;
+    return;
+  }
+  size_t di = 0;
+  const uint8_t* s = (const uint8_t*)src;
+
+  auto append = [&](char c) {
+    if (di < dest_size - 1) {
+      dest[di++] = c;
+    }
+  };
+
+  while (*s && di < dest_size - 1) {
+    uint8_t b1 = *s;
+    if (b1 < 0x80) {
+      if (b1 >= 32 && b1 <= 126) {
+        append((char)b1);
+      } else if (b1 == '\n' || b1 == '\r') {
+        append('\n');
+      } else if (b1 == '\t') {
+        append(' ');
+      }
+      s++;
+    } else if ((b1 & 0xE0) == 0xC0) {
+      // 2-byte sequence
+      uint8_t b2 = *(s + 1);
+      if (b2 == 0) break;
+      s += 2;
+      if (b1 == 0xC2) {
+        if (b2 == 0xB0) append((char)0xF8); // CP437 degree symbol '°'
+        else if (b2 == 0xB1) append((char)0xF1); // '±'
+        else if (b2 == 0xB5) append((char)0xE6); // 'µ'
+        else if (b2 == 0xB7) append((char)0xFA); // '·'
+        else if (b2 == 0xA0) append(' ');        // Non-breaking space
+        else if (b2 == 0xA9) append('c');        // ©
+        else if (b2 == 0xAE) append('r');        // ®
+      } else if (b1 == 0xC3) {
+        // Accented latin characters
+        if (b2 >= 0x80 && b2 <= 0x85) append('A');
+        else if (b2 == 0x86) { append('A'); append('E'); }
+        else if (b2 == 0x87) append('C');
+        else if (b2 >= 0x88 && b2 <= 0x8B) append('E');
+        else if (b2 >= 0x8C && b2 <= 0x8F) append('I');
+        else if (b2 == 0x90) append('D');
+        else if (b2 == 0x91) append('N');
+        else if (b2 >= 0x92 && b2 <= 0x96) append('O');
+        else if (b2 >= 0x99 && b2 <= 0x9C) append('U');
+        else if (b2 == 0x9D) append('Y');
+        else if (b2 == 0x9F) { append('s'); append('s'); }
+        else if (b2 >= 0xA0 && b2 <= 0xA5) append('a');
+        else if (b2 == 0xA6) { append('a'); append('e'); }
+        else if (b2 == 0xA7) append('c');
+        else if (b2 >= 0xA8 && b2 <= 0xAB) append('e');
+        else if (b2 >= 0xAC && b2 <= 0xAF) append('i');
+        else if (b2 == 0xB1) append('n');
+        else if (b2 >= 0xB2 && b2 <= 0xB6) append('o');
+        else if (b2 >= 0xB9 && b2 <= 0xBC) append('u');
+        else if (b2 == 0xBD || b2 == 0xBF) append('y');
+      }
+    } else if ((b1 & 0xF0) == 0xE0) {
+      // 3-byte sequence
+      uint8_t b2 = *(s + 1);
+      uint8_t b3 = *(s + 2);
+      if (b2 == 0 || b3 == 0) break;
+      s += 3;
+      if (b1 == 0xE2 && b2 == 0x80) {
+        if (b3 == 0x98 || b3 == 0x99) append('\'');     // ‘ ’
+        else if (b3 == 0x9C || b3 == 0x9D) append('\"'); // “ ”
+        else if (b3 == 0x93 || b3 == 0x94) append('-');  // – —
+        else if (b3 == 0xA2) append('*');               // •
+        else if (b3 == 0xA6) { append('.'); append('.'); append('.'); } // …
+      }
+    } else if ((b1 & 0xF8) == 0xF0) {
+      // 4-byte sequence (Emojis, etc.)
+      uint8_t b2 = *(s + 1);
+      uint8_t b3 = *(s + 2);
+      uint8_t b4 = *(s + 3);
+      if (b2 == 0 || b3 == 0 || b4 == 0) break;
+      s += 4;
+      // Skip emojis entirely so no strange glyphs like =fiñQ appear
+    } else {
+      s++;
+    }
+  }
+  dest[di] = 0;
+}
+
 void TapUI::addReceivedMessage(const char* sender, const char* text, bool isDirect, const uint8_t* pubkey) {
   _last_activity_ms = millis();
   if (_msg_count >= MAX_UI_MESSAGES) {
@@ -1033,18 +1131,15 @@ void TapUI::addReceivedMessage(const char* sender, const char* text, bool isDire
     _msg_count = MAX_UI_MESSAGES - 1;
   }
   UIMessage* m = &_messages[_msg_count++];
-  strncpy(m->sender, sender ? sender : "Mesh", sizeof(m->sender) - 1);
-  m->sender[sizeof(m->sender) - 1] = 0;
-  strncpy(m->text, text ? text : "", sizeof(m->text) - 1);
-  m->text[sizeof(m->text) - 1] = 0;
+  sanitizeUTF8String(m->sender, sender ? sender : "Mesh", sizeof(m->sender));
+  sanitizeUTF8String(m->text, text ? text : "", sizeof(m->text));
   m->is_outgoing = false;
   m->is_direct = isDirect;
   m->channel_idx = 0;
   m->timestamp = the_mesh.getRTCClock()->getCurrentTime();
   if (pubkey) memcpy(m->contact_pubkey, pubkey, 4);
   else memset(m->contact_pubkey, 0, 4);
-  strncpy(m->target_name, sender ? sender : "", sizeof(m->target_name) - 1);
-  m->target_name[sizeof(m->target_name) - 1] = 0;
+  sanitizeUTF8String(m->target_name, sender ? sender : "", sizeof(m->target_name));
 
   // Check if user is currently viewing this exact DM conversation at the bottom
   bool viewing_now = (!_is_screen_sleeping && _current_tab == TAB_CHAT && _edit_mode == EDIT_NONE &&
@@ -1077,17 +1172,14 @@ void TapUI::addReceivedChannelMessage(uint8_t channel_idx, const char* channel_n
     _msg_count = MAX_UI_MESSAGES - 1;
   }
   UIMessage* m = &_messages[_msg_count++];
-  strncpy(m->sender, sender ? sender : "Mesh", sizeof(m->sender) - 1);
-  m->sender[sizeof(m->sender) - 1] = 0;
-  strncpy(m->text, text ? text : "", sizeof(m->text) - 1);
-  m->text[sizeof(m->text) - 1] = 0;
+  sanitizeUTF8String(m->sender, sender ? sender : "Mesh", sizeof(m->sender));
+  sanitizeUTF8String(m->text, text ? text : "", sizeof(m->text));
   m->is_outgoing = false;
   m->is_direct = false;
   m->channel_idx = channel_idx;
   m->timestamp = the_mesh.getRTCClock()->getCurrentTime();
   memset(m->contact_pubkey, 0, 4);
-  strncpy(m->target_name, channel_name ? channel_name : "Public", sizeof(m->target_name) - 1);
-  m->target_name[sizeof(m->target_name) - 1] = 0;
+  sanitizeUTF8String(m->target_name, channel_name ? channel_name : "Public", sizeof(m->target_name));
 
   bool viewing_now = (!_is_screen_sleeping && _current_tab == TAB_CHAT && _edit_mode == EDIT_NONE &&
                       _chat_scroll_offset == 0 && _active_contact_idx == -1 && _active_channel == channel_idx);
@@ -1112,8 +1204,7 @@ void TapUI::addSentMessage(const char* text) {
   }
   UIMessage* m = &_messages[_msg_count++];
   strcpy(m->sender, "You");
-  strncpy(m->text, text ? text : "", sizeof(m->text) - 1);
-  m->text[sizeof(m->text) - 1] = 0;
+  sanitizeUTF8String(m->text, text ? text : "", sizeof(m->text));
   m->is_outgoing = true;
   m->unread = false;
   m->timestamp = the_mesh.getRTCClock()->getCurrentTime();
@@ -1419,7 +1510,10 @@ void TapUI::update() {
     _needs_chat_messages_redraw = false;
     _needs_tabbar_redraw = false;
     if (_current_tab == TAB_CHAT) {
-      drawChatMessagesOnly();
+      if (!_kb_visible && _edit_mode == EDIT_NONE) {
+        drawChatMessagesOnly();
+        drawChatInputPrompt();
+      }
       drawTabBar();
     }
   } else if (_needs_tabbar_redraw) {
@@ -1613,6 +1707,7 @@ void TapUI::handleTabTouch(uint16_t tx, uint16_t ty) {
       _current_tab = (TapTab)tabIdx;
       _edit_mode = EDIT_NONE;
       _editing_chan_idx = -1;
+      _kb_visible = false;
       _needs_full_redraw = true;
     }
   }
@@ -1622,64 +1717,19 @@ void TapUI::handleTabTouch(uint16_t tx, uint16_t ty) {
 // CHAT SCREEN, SCROLLBACK & GENERALIZED KEYBOARD INPUT
 // -------------------------------------------------------------
 void TapUI::drawChatScreen() {
-  drawChatMessagesOnly();
-  drawTextInputBar();
-  drawKeyboard();
+  if (_kb_visible || _edit_mode != EDIT_NONE) {
+    drawTextInputBar();
+    drawKeyboard();
+  } else {
+    drawChatMessagesOnly();
+    drawChatInputPrompt();
+  }
 }
 
 void TapUI::drawChatMessagesOnly() {
-  // Clear strictly chat history area: Y in 44..116
+  // Clear strictly chat history area: Y in 44..207 (height 164)
   _display->setColor(colBg());
-  _display->fillRect(0, 44, 320, 73);
-
-  if (_edit_mode != EDIT_NONE) {
-    _display->setColor(colTitle());
-    _display->setTextSize(1);
-    const char* title = "[EDITING SETTING]";
-    const char* line1 = "Type value below on keyboard.";
-    const char* line2 = "Tap green SAVE button when done.";
-
-    switch (_edit_mode) {
-      case EDIT_NODE_NAME:
-        title = "[EDIT NODE NAME]";
-        line1 = "Enter your MeshCore node name (max 31 chars).";
-        break;
-      case EDIT_RADIO_FREQ:
-        title = "[SET LORA FREQUENCY (MHz)]";
-        line1 = "Enter frequency in MHz (e.g. 910.525 or 869.618).";
-        break;
-      case EDIT_BLE_PIN:
-        title = "[SET 6-DIGIT BLE PAIRING PIN]";
-        line1 = "Enter a 6-digit number (100000 - 999999).";
-        break;
-      case EDIT_CLOCK_TIME:
-        title = "[SET RTC DATE & TIME (UTC)]";
-        line1 = "Format: YYYY-MM-DD HH:MM:SS";
-        break;
-      case EDIT_CHAN_NAME:
-        title = "[SET CHANNEL NAME]";
-        line1 = "Prefix with # (e.g. #mesh) for auto SHA256 key.";
-        break;
-      case EDIT_CHAN_KEY:
-        title = "[SET CHANNEL KEY (HEX OR BASE64)]";
-        line1 = "Enter 32-char Hex or 24-char Base64 PSK.";
-        break;
-      default: break;
-    }
-
-    drawStr(8, 48, title);
-
-    // [CANCEL] button: X in 245..312, Y in 46..64
-    _display->setColor(COLOR_RED_BTN);
-    _display->fillRect(245, 46, 67, 18);
-    _display->setColor(COLOR_WHITE);
-    drawStr(255, 51, "CANCEL");
-
-    _display->setColor(colSubText());
-    drawStr(8, 70, line1);
-    drawStr(8, 86, line2);
-    return;
-  }
+  _display->fillRect(0, 44, 320, 164);
 
   // Filter messages for currently selected target
   ContactInfo active_c;
@@ -1720,7 +1770,7 @@ void TapUI::drawChatMessagesOnly() {
       char targetPrompt[64];
       snprintf(targetPrompt, sizeof(targetPrompt), "Direct Chat with @%s", active_c.name[0] ? active_c.name : "Node");
       drawStr(25, 65, targetPrompt);
-      drawStr(35, 82, "Type message below to send private text");
+      drawStr(35, 82, "Tap TYPE below to send private text");
     } else {
       ChannelDetails ch;
       the_mesh.getChannel(_active_channel, ch);
@@ -1731,7 +1781,7 @@ void TapUI::drawChatMessagesOnly() {
         snprintf(chPrompt, sizeof(chPrompt), "Channel #%s Broadcast (Ch #%u)", ch.name[0] ? ch.name : "Public", _active_channel);
       }
       drawStr(25, 65, chPrompt);
-      drawStr(35, 82, "Type message below to transmit on LoRa");
+      drawStr(35, 82, "Tap TYPE below to transmit on LoRa");
     }
     return;
   }
@@ -1777,36 +1827,66 @@ void TapUI::drawChatMessagesOnly() {
   int y = 46;
   for (int l = startLine; l < endLine; l++) {
     _display->setColor(_chat_lines[l].color);
+    _display->setTextSize(1);
     drawStr(6, y, _chat_lines[l].text);
     y += CHAT_LINE_HEIGHT;
   }
 
-  // Right-side Scroll Bar & Controls (X in 280..318, Y in 45..115)
+  // Right-side Scroll Bar & Controls (X in 278..318, Y in 46..204)
   _display->setColor(colCardBg());
-  _display->fillRect(280, 45, 38, 22);
+  _display->fillRect(278, 46, 40, 26);
   _display->setColor(_chat_scroll_offset < maxScroll ? colTitle() : colBorder());
-  _display->drawRect(280, 45, 38, 22);
+  _display->drawRect(278, 46, 40, 26);
   _display->setColor(_chat_scroll_offset < maxScroll ? colText() : colMutedText());
-  drawStr(288, 52, "UP ^");
+  _display->setTextSize(1);
+  drawStr(286, 55, "UP ^");
 
-  // Middle indicator (shows e.g. "6/12" or "ALL")
+  // Middle indicator (shows e.g. "13/26" or "ALL")
   char posBuf[12];
   if (_total_chat_lines <= VISIBLE_CHAT_LINES) {
     strcpy(posBuf, "ALL");
     _display->setColor(colSubText());
-    drawStr(290, 76, posBuf);
+    drawStr(288, 120, posBuf);
   } else {
     snprintf(posBuf, sizeof(posBuf), "%d/%d", endLine, _total_chat_lines);
     _display->setColor(colSubText());
-    drawStr(282, 76, posBuf);
+    drawStr(280, 120, posBuf);
   }
 
   _display->setColor(colCardBg());
-  _display->fillRect(280, 93, 38, 22);
+  _display->fillRect(278, 178, 40, 26);
   _display->setColor(_chat_scroll_offset > 0 ? colTitle() : colBorder());
-  _display->drawRect(280, 93, 38, 22);
+  _display->drawRect(278, 178, 40, 26);
   _display->setColor(_chat_scroll_offset > 0 ? colText() : colMutedText());
-  drawStr(288, 100, "DN v");
+  _display->setTextSize(1);
+  drawStr(286, 187, "DN v");
+}
+
+void TapUI::drawChatInputPrompt() {
+  // Bottom prompt bar: Y in 209..238 (height 30)
+  _display->setColor(colCardBg());
+  _display->fillRect(2, 209, 316, 29);
+  _display->setColor(colBorder());
+  _display->drawRect(2, 209, 316, 29);
+
+  _display->setTextSize(1);
+  if (_text_len > 0) {
+    _display->setColor(colText());
+    char draftBuf[36];
+    snprintf(draftBuf, sizeof(draftBuf), "> Draft: %.22s...", _text_buffer);
+    drawStr(8, 219, draftBuf);
+  } else {
+    _display->setColor(colSubText());
+    drawStr(8, 219, "> Tap here to write a message...");
+  }
+
+  // [TYPE] button: X in 248..314, Y in 212..235
+  _display->setColor(COLOR_GREEN_BTN);
+  _display->fillRect(248, 212, 66, 23);
+  _display->setColor(colBorder());
+  _display->drawRect(248, 212, 66, 23);
+  _display->setColor(COLOR_WHITE);
+  drawStr(262, 219, "TYPE");
 }
 
 void TapUI::formatAndWrapMessage(const char* prefix, const char* text, uint16_t color) {
@@ -1931,157 +2011,240 @@ void TapUI::formatAndWrapMessage(const char* prefix, const char* text, uint16_t 
 }
 
 void TapUI::drawTextInputBar() {
-  // Box: Y in 118..138
-  _display->setColor(colKeyBg());
-  _display->fillRect(1, 118, 318, 21);
+  if (_edit_mode != EDIT_NONE) {
+    // Edit mode bar: Y in 44..68 (height 25)
+    _display->setColor(colCardBg());
+    _display->fillRect(1, 44, 318, 25);
+    _display->setColor(colTitle());
+    _display->drawRect(1, 44, 318, 25);
 
+    const char* title = "EDIT SETTING";
+    switch (_edit_mode) {
+      case EDIT_NODE_NAME:  title = "EDIT NODE NAME"; break;
+      case EDIT_RADIO_FREQ: title = "SET LORA FREQ (MHz)"; break;
+      case EDIT_BLE_PIN:    title = "SET BLE 6-DIGIT PIN"; break;
+      case EDIT_CLOCK_TIME: title = "SET RTC TIME (UTC)"; break;
+      case EDIT_CHAN_NAME:  title = "SET CHANNEL NAME"; break;
+      case EDIT_CHAN_KEY:   title = "SET CHANNEL KEY"; break;
+      default: break;
+    }
+
+    _display->setTextSize(1);
+    _display->setColor(COLOR_GOLD_STAR);
+    drawStr(6, 47, title);
+
+    _display->setColor(colText());
+    char disp[MAX_MSG_TEXT_LEN + 4];
+    snprintf(disp, sizeof(disp), "> %s_", _text_buffer);
+    drawStr(6, 58, disp);
+
+    // [CANCEL] button: X in 244..316, Y in 46..66
+    _display->setColor(COLOR_RED_BTN);
+    _display->fillRect(244, 46, 72, 21);
+    _display->setColor(COLOR_WHITE);
+    drawStr(258, 52, "CANCEL");
+    return;
+  }
+
+  // Regular chat text input bar: Y in 44..68
+  _display->setColor(colKeyBg());
+  _display->fillRect(1, 44, 252, 25);
   _display->setColor(colTitle());
-  _display->drawRect(1, 118, 318, 21);
+  _display->drawRect(1, 44, 252, 25);
 
   _display->setTextSize(1);
   if (_text_len == 0) {
     _display->setColor(colMutedText());
-    if (_edit_mode != EDIT_NONE) {
-      drawStr(8, 124, "> Enter value...");
-    } else {
-      drawStr(8, 124, "> Type message here...");
-    }
+    drawStr(6, 52, "> Type message here...");
   } else {
     _display->setColor(colText());
     char displayLine[MAX_MSG_TEXT_LEN + 4];
     snprintf(displayLine, sizeof(displayLine), "> %s_", _text_buffer);
-    drawStr(8, 124, displayLine);
+    drawStr(6, 52, displayLine);
   }
+
+  // [HIDE] button on top-right: X in 256..318, Y in 44..68
+  _display->setColor(colCardBg());
+  _display->fillRect(256, 44, 62, 25);
+  _display->setColor(colBorder());
+  _display->drawRect(256, 44, 62, 25);
+  _display->setColor(colText());
+  drawStr(268, 52, "v HIDE");
 }
 
 void TapUI::drawKeyboard() {
-  // Keyboard area: Y in 140..239 (height 99)
+  // Keyboard area: Y in 70..239 (height 170)
   _display->setColor(colPanelBg());
-  _display->fillRect(0, 140, 320, 100);
-
-  _display->setTextSize(1);
+  _display->fillRect(0, 70, 320, 170);
 
   const char* r0_lower = "qwertyuiop";
   const char* r0_upper = "QWERTYUIOP";
   const char* r0_sym   = "1234567890";
   const char* r0 = (_kb_mode == KB_SYMBOLS) ? r0_sym : ((_kb_mode == KB_UPPER) ? r0_upper : r0_lower);
 
-  for (int k = 0; k < 10; k++) {
-    int kx = 1 + k * 32;
-    _display->setColor(colKeyBg());
-    _display->fillRect(kx, 142, 30, 23);
-    _display->setColor(colBorder());
-    _display->drawRect(kx, 142, 30, 23);
-
-    _display->setColor(colText());
-    char buf[2] = { r0[k], 0 };
-    drawStr(kx + 11, 149, buf);
-  }
-
   const char* r1_lower = "asdfghjkl";
   const char* r1_upper = "ASDFGHJKL";
   const char* r1_sym   = "@#$%&*-+/";
   const char* r1 = (_kb_mode == KB_SYMBOLS) ? r1_sym : ((_kb_mode == KB_UPPER) ? r1_upper : r1_lower);
-
-  for (int k = 0; k < 9; k++) {
-    int kx = 17 + k * 32;
-    _display->setColor(colKeyBg());
-    _display->fillRect(kx, 167, 30, 23);
-    _display->setColor(colBorder());
-    _display->drawRect(kx, 167, 30, 23);
-
-    _display->setColor(colText());
-    char buf[2] = { r1[k], 0 };
-    drawStr(kx + 11, 174, buf);
-  }
-
-  // Row 2: Shift, 7 keys, DEL
-  _display->setColor((_kb_mode == KB_UPPER) ? COLOR_BLUE_KEY : colCardBg());
-  _display->fillRect(1, 192, 36, 23);
-  _display->setColor(colBorder());
-  _display->drawRect(1, 192, 36, 23);
-  _display->setColor((_kb_mode == KB_UPPER) ? COLOR_WHITE : colText());
-  drawStr(7, 199, "CAP");
 
   const char* r2_lower = "zxcvbnm";
   const char* r2_upper = "ZXCVBNM";
   const char* r2_sym   = "()!?:,.";
   const char* r2 = (_kb_mode == KB_SYMBOLS) ? r2_sym : ((_kb_mode == KB_UPPER) ? r2_upper : r2_lower);
 
-  for (int k = 0; k < 7; k++) {
-    int kx = 39 + k * 32;
+  // Row 0: Y = 72..110 (height 38)
+  for (int k = 0; k < 10; k++) {
+    int kx = 1 + k * 32;
     _display->setColor(colKeyBg());
-    _display->fillRect(kx, 192, 30, 23);
+    _display->fillRect(kx, 72, 30, 38);
     _display->setColor(colBorder());
-    _display->drawRect(kx, 192, 30, 23);
+    _display->drawRect(kx, 72, 30, 38);
 
     _display->setColor(colText());
-    char buf[2] = { r2[k], 0 };
-    drawStr(kx + 11, 199, buf);
+    _display->setTextSize(2);
+    char buf[2] = { r0[k], 0 };
+    drawStr(kx + 9, 83, buf);
   }
 
-  // DEL button: X in 264..319
+  // Row 1: Y = 114..152 (height 38)
+  for (int k = 0; k < 9; k++) {
+    int kx = 17 + k * 32;
+    _display->setColor(colKeyBg());
+    _display->fillRect(kx, 114, 30, 38);
+    _display->setColor(colBorder());
+    _display->drawRect(kx, 114, 30, 38);
+
+    _display->setColor(colText());
+    _display->setTextSize(2);
+    char buf[2] = { r1[k], 0 };
+    drawStr(kx + 9, 125, buf);
+  }
+
+  // Row 2: Y = 156..194 (height 38)
+  // CAP button: X in 1..35
+  _display->setColor((_kb_mode == KB_UPPER) ? COLOR_BLUE_KEY : colCardBg());
+  _display->fillRect(1, 156, 35, 38);
+  _display->setColor(colBorder());
+  _display->drawRect(1, 156, 35, 38);
+  _display->setColor((_kb_mode == KB_UPPER) ? COLOR_WHITE : colText());
+  _display->setTextSize(1);
+  drawStr(8, 170, "CAP");
+
+  // 7 keys: X = 38 + k*32
+  for (int k = 0; k < 7; k++) {
+    int kx = 38 + k * 32;
+    _display->setColor(colKeyBg());
+    _display->fillRect(kx, 156, 30, 38);
+    _display->setColor(colBorder());
+    _display->drawRect(kx, 156, 30, 38);
+
+    _display->setColor(colText());
+    _display->setTextSize(2);
+    char buf[2] = { r2[k], 0 };
+    drawStr(kx + 9, 167, buf);
+  }
+
+  // DEL button: X in 264..318
   _display->setColor(COLOR_RED_BTN);
-  _display->fillRect(264, 192, 55, 23);
+  _display->fillRect(264, 156, 55, 38);
   _display->setColor(colBorder());
-  _display->drawRect(264, 192, 55, 23);
+  _display->drawRect(264, 156, 55, 38);
   _display->setColor(COLOR_WHITE);
-  drawStr(280, 199, "DEL");
+  _display->setTextSize(1);
+  drawStr(280, 170, "DEL");
 
-  // Row 3: ?123, QUICK/CLEAR, SPACE, SEND/SAVE
+  // Row 3: Y = 198..237 (height 39)
+  _display->setTextSize(1);
+
+  // ?123 button: X in 1..42
   _display->setColor((_kb_mode == KB_SYMBOLS) ? COLOR_BLUE_KEY : colCardBg());
-  _display->fillRect(1, 217, 44, 22);
+  _display->fillRect(1, 198, 42, 39);
   _display->setColor(colBorder());
-  _display->drawRect(1, 217, 44, 22);
+  _display->drawRect(1, 198, 42, 39);
   _display->setColor((_kb_mode == KB_SYMBOLS) ? COLOR_WHITE : colText());
-  drawStr(6, 224, (_kb_mode == KB_SYMBOLS) ? "ABC" : "?123");
+  drawStr(8, 212, (_kb_mode == KB_SYMBOLS) ? "ABC" : "?123");
 
+  // QUICK / CLEAR button: X in 45..95
   _display->setColor(COLOR_PURPLE_BTN);
-  _display->fillRect(47, 217, 50, 22);
+  _display->fillRect(45, 198, 51, 39);
   _display->setColor(colBorder());
-  _display->drawRect(47, 217, 50, 22);
+  _display->drawRect(45, 198, 51, 39);
   _display->setColor(COLOR_WHITE);
-  drawStr(54, 224, (_edit_mode != EDIT_NONE) ? "CLEAR" : "QUICK");
+  drawStr(52, 212, (_edit_mode != EDIT_NONE) ? "CLEAR" : "QUICK");
 
+  // SPACE button: X in 98..210
   _display->setColor(colKeyBg());
-  _display->fillRect(99, 217, 140, 22);
+  _display->fillRect(98, 198, 113, 39);
   _display->setColor(colBorder());
-  _display->drawRect(99, 217, 140, 22);
+  _display->drawRect(98, 198, 113, 39);
   _display->setColor(colSubText());
-  drawStr(150, 224, "SPACE");
+  drawStr(138, 212, "SPACE");
 
-  _display->setColor(COLOR_GREEN_BTN);
-  _display->fillRect(242, 217, 77, 22);
+  // HIDE button: X in 213..255
+  _display->setColor(colCardBg());
+  _display->fillRect(213, 198, 43, 39);
   _display->setColor(colBorder());
-  _display->drawRect(242, 217, 77, 22);
+  _display->drawRect(213, 198, 43, 39);
+  _display->setColor(colText());
+  drawStr(220, 212, "HIDE");
+
+  // SEND / SAVE button: X in 258..318
+  _display->setColor(COLOR_GREEN_BTN);
+  _display->fillRect(258, 198, 61, 39);
+  _display->setColor(colBorder());
+  _display->drawRect(258, 198, 61, 39);
   _display->setColor(COLOR_WHITE);
-  drawStr(264, 224, (_edit_mode != EDIT_NONE) ? "SAVE" : "SEND");
+  drawStr(272, 212, (_edit_mode != EDIT_NONE) ? "SAVE" : "SEND");
 }
 
 void TapUI::handleChatTouch(uint16_t tx, uint16_t ty) {
-  if (_edit_mode != EDIT_NONE && tx >= 240 && tx <= 318 && ty >= 44 && ty <= 68) {
-    cancelKeyboardEdit();
+  if (_edit_mode != EDIT_NONE) {
+    if (tx >= 240 && tx <= 318 && ty >= 44 && ty <= 68) {
+      cancelKeyboardEdit();
+      return;
+    }
+    if (ty >= 70) {
+      handleKeyboardTouch(tx, ty);
+    }
     return;
   }
 
-  // Scroll Up / Down buttons in chat area: X in 276..319, Y in 44..116
-  if (_edit_mode == EDIT_NONE && tx >= 276 && ty >= 44 && ty <= 116) {
-    if (ty <= 74) {
+  if (_kb_visible) {
+    // Keyboard is visible:
+    // Check if tapping [HIDE] button at X in 254..318, Y in 44..68
+    if (tx >= 254 && ty >= 44 && ty <= 68) {
+      _kb_visible = false;
+      _needs_full_redraw = true;
+      return;
+    }
+    if (ty >= 70) {
+      handleKeyboardTouch(tx, ty);
+    }
+    return;
+  }
+
+  // Keyboard is HIDDEN: full 13-line chat view
+  // Scroll Up / Down buttons on right side: X >= 270, Y in 44..207
+  if (tx >= 270 && ty >= 44 && ty <= 207) {
+    if (ty <= 85) {
       // UP (older lines)
-      _chat_scroll_offset += 3;
+      _chat_scroll_offset += 4;
       _needs_chat_messages_redraw = true;
       return;
-    } else if (ty >= 88) {
+    } else if (ty >= 165) {
       // DN (newer lines)
-      _chat_scroll_offset -= 3;
+      _chat_scroll_offset -= 4;
       if (_chat_scroll_offset < 0) _chat_scroll_offset = 0;
       _needs_chat_messages_redraw = true;
       return;
     }
   }
 
-  if (ty >= 140) {
-    handleKeyboardTouch(tx, ty);
+  // Tapping bottom prompt bar (Y >= 208) or tapping chat message area opens keyboard
+  if (ty >= 208 || (tx < 270 && ty >= 120)) {
+    _kb_visible = true;
+    _needs_full_redraw = true;
+    return;
   }
 }
 
@@ -2101,27 +2264,30 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
   const char* r2_sym   = "()!?:,.";
   const char* r2 = (_kb_mode == KB_SYMBOLS) ? r2_sym : ((_kb_mode == KB_UPPER) ? r2_upper : r2_lower);
 
-  if (ty >= 142 && ty <= 165) {
+  // Row 0: Y in 70..112
+  if (ty >= 70 && ty <= 112) {
     for (int k = 0; k < 10; k++) {
       int kx = 1 + k * 32;
-      if (tx >= kx && tx <= kx + 30) {
+      if (tx >= kx && tx <= kx + 31) {
         appendChar(r0[k]);
         return;
       }
     }
   }
 
-  if (ty >= 167 && ty <= 190) {
+  // Row 1: Y in 113..154
+  if (ty >= 113 && ty <= 154) {
     for (int k = 0; k < 9; k++) {
       int kx = 17 + k * 32;
-      if (tx >= kx && tx <= kx + 30) {
+      if (tx >= kx && tx <= kx + 31) {
         appendChar(r1[k]);
         return;
       }
     }
   }
 
-  if (ty >= 192 && ty <= 215) {
+  // Row 2: Y in 155..196
+  if (ty >= 155 && ty <= 196) {
     if (tx >= 1 && tx <= 36) {
       if (_kb_mode == KB_LOWER) _kb_mode = KB_UPPER;
       else if (_kb_mode == KB_UPPER) _kb_mode = KB_LOWER;
@@ -2129,26 +2295,27 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
       return;
     }
     for (int k = 0; k < 7; k++) {
-      int kx = 39 + k * 32;
-      if (tx >= kx && tx <= kx + 30) {
+      int kx = 38 + k * 32;
+      if (tx >= kx && tx <= kx + 31) {
         appendChar(r2[k]);
         return;
       }
     }
-    if (tx >= 264 && tx <= 319) {
+    if (tx >= 262 && tx <= 319) {
       deleteChar();
       return;
     }
   }
 
-  if (ty >= 217 && ty <= 239) {
-    if (tx >= 1 && tx <= 44) {
+  // Row 3: Y in 197..240
+  if (ty >= 197 && ty <= 240) {
+    if (tx >= 1 && tx <= 43) {
       if (_kb_mode == KB_SYMBOLS) _kb_mode = KB_LOWER;
       else _kb_mode = KB_SYMBOLS;
       drawKeyboard();
       return;
     }
-    if (tx >= 47 && tx <= 96) {
+    if (tx >= 44 && tx <= 96) {
       if (_edit_mode != EDIT_NONE) {
         _text_len = 0;
         _text_buffer[0] = 0;
@@ -2162,19 +2329,29 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
       drawTextInputBar();
       return;
     }
-    if (tx >= 99 && tx <= 239) {
+    if (tx >= 97 && tx <= 211) {
       appendChar(' ');
       return;
     }
-    if (tx >= 242 && tx <= 319) {
+    if (tx >= 212 && tx <= 256) {
+      // HIDE
+      _kb_visible = false;
+      _needs_full_redraw = true;
+      return;
+    }
+    if (tx >= 257 && tx <= 319) {
+      // SEND / SAVE
       if (_edit_mode != EDIT_NONE) {
         commitKeyboardEdit();
       } else if (_text_len > 0) {
         sendMessage(_text_buffer);
         _text_len = 0;
         _text_buffer[0] = 0;
-        drawTextInputBar();
-        drawChatMessagesOnly();
+        _kb_visible = false;
+        _needs_full_redraw = true;
+      } else {
+        _kb_visible = false;
+        _needs_full_redraw = true;
       }
       return;
     }
