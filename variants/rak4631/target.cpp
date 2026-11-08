@@ -5,7 +5,7 @@
 RAK4631Board board;
 
 #ifndef PIN_USER_BTN
-  #define PIN_USER_BTN (-1)
+  #define PIN_USER_BTN 31
 #endif
 
 #ifdef DISPLAY_CLASS
