@@ -73,6 +73,7 @@ void SH1106Display::startFrame(ColorVal bkg)
   _color = SH110X_WHITE;
   display.setTextColor(_color);
   display.setTextSize(1);
+  display.setTextWrap(false);
   display.cp437(true); // Use full 256 char 'Code Page 437' font
 }
 

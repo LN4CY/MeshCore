@@ -371,20 +371,43 @@ void UITask::renderPageStats() {
   _display->setCursor(0, 11);
   _display->print(line);
 
-  // Packets sent / received
-  snprintf(line, sizeof(line), "Pkts: Tx %lu / Rx %lu",
-           (unsigned long)radio_driver.getPacketsSent(),
-           (unsigned long)radio_driver.getPacketsRecv());
+  // Formatted airtimes
+  char tx_air[10];
+  float tx_sec = _mesh ? (float)_mesh->getTotalAirTime() / 1000.0f : 0.0f;
+  if (tx_sec < 60.0f) {
+    snprintf(tx_air, sizeof(tx_air), "%1.1fs", tx_sec);
+  } else if (tx_sec < 3600.0f) {
+    snprintf(tx_air, sizeof(tx_air), "%lus", (unsigned long)tx_sec);
+  } else {
+    snprintf(tx_air, sizeof(tx_air), "%1.1fh", tx_sec / 3600.0f);
+  }
+
+  char rx_air[10];
+  float rx_sec = _mesh ? (float)_mesh->getReceiveAirTime() / 1000.0f : 0.0f;
+  if (rx_sec < 60.0f) {
+    snprintf(rx_air, sizeof(rx_air), "%1.1fs", rx_sec);
+  } else if (rx_sec < 3600.0f) {
+    snprintf(rx_air, sizeof(rx_air), "%lus", (unsigned long)rx_sec);
+  } else {
+    snprintf(rx_air, sizeof(rx_air), "%1.1fh", rx_sec / 3600.0f);
+  }
+
+  // Dedicated lines for TX and RX so they never overflow
+  uint32_t tx_pkts = radio_driver.getPacketsSent();
+  uint32_t rx_pkts = radio_driver.getPacketsRecv();
+
+  if (tx_pkts < 10000) {
+    snprintf(line, sizeof(line), "TX: %lu pkts (%s)", (unsigned long)tx_pkts, tx_air);
+  } else {
+    snprintf(line, sizeof(line), "TX: %lu (%s)", (unsigned long)tx_pkts, tx_air);
+  }
   _display->setCursor(0, 22);
   _display->print(line);
 
-  // Airtime
-  if (_mesh) {
-    snprintf(line, sizeof(line), "Air: %1.1fs Rx:%1.1fs",
-             (float)_mesh->getTotalAirTime() / 1000.0f,
-             (float)_mesh->getReceiveAirTime() / 1000.0f);
+  if (rx_pkts < 10000) {
+    snprintf(line, sizeof(line), "RX: %lu pkts (%s)", (unsigned long)rx_pkts, rx_air);
   } else {
-    snprintf(line, sizeof(line), "Air: 0.0s");
+    snprintf(line, sizeof(line), "RX: %lu (%s)", (unsigned long)rx_pkts, rx_air);
   }
   _display->setCursor(0, 33);
   _display->print(line);
