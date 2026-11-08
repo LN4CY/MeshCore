@@ -1065,64 +1065,229 @@ void TapUI::sanitizeUTF8String(char* dest, const char* src, size_t dest_size) {
       }
       s++;
     } else if ((b1 & 0xE0) == 0xC0) {
-      // 2-byte sequence
+      // 2-byte UTF-8 sequence
       uint8_t b2 = *(s + 1);
       if (b2 == 0) break;
       s += 2;
       if (b1 == 0xC2) {
-        if (b2 == 0xB0) append((char)0xF8); // CP437 degree symbol '°'
-        else if (b2 == 0xB1) append((char)0xF1); // '±'
-        else if (b2 == 0xB5) append((char)0xE6); // 'µ'
-        else if (b2 == 0xB7) append((char)0xFA); // '·'
-        else if (b2 == 0xA0) append(' ');        // Non-breaking space
-        else if (b2 == 0xA9) append('c');        // ©
-        else if (b2 == 0xAE) append('r');        // ®
+        if (b2 == 0xB0 || b2 == 0xBA) append((char)0xF8); // Degree symbol '°' / masculine ordinal
+        else if (b2 == 0xB1) append((char)0xF1);          // '±'
+        else if (b2 == 0xB5) append((char)0xE6);          // 'µ'
+        else if (b2 == 0xB7) append((char)0xFA);          // '·' middle dot
+        else if (b2 == 0xA0) append(' ');                 // Non-breaking space
+        else if (b2 == 0xA9) append('c');                 // ©
+        else if (b2 == 0xAE) append('r');                 // ®
+        else if (b2 == 0xAB) append((char)0xAE);          // '«'
+        else if (b2 == 0xBB) append((char)0xAF);          // '»'
+        else if (b2 == 0xBF) append((char)0xA8);          // '¿'
+        else if (b2 == 0xA1) append((char)0xAD);          // '¡'
+        else if (b2 == 0xA2) append((char)0x9B);          // '¢'
+        else if (b2 == 0xA3) append((char)0x9C);          // '£'
+        else if (b2 == 0xA5) append((char)0x9D);          // '¥'
+        else if (b2 == 0xBD) append((char)0xAB);          // '½'
+        else if (b2 == 0xBC) append((char)0xAC);          // '¼'
+        else if (b2 == 0xBE) { append('3'); append('/'); append('4'); } // '¾'
+        else if (b2 == 0xB2) append((char)0xFD);          // '²'
+        else if (b2 == 0xB3) append('3');                 // '³'
+        else if (b2 == 0xB9) append('1');                 // '¹'
       } else if (b1 == 0xC3) {
-        // Accented latin characters
-        if (b2 >= 0x80 && b2 <= 0x85) append('A');
-        else if (b2 == 0x86) { append('A'); append('E'); }
-        else if (b2 == 0x87) append('C');
-        else if (b2 >= 0x88 && b2 <= 0x8B) append('E');
+        // Accented Latin characters & math in CP437
+        if (b2 == 0x84) append((char)0x8E);      // Ä
+        else if (b2 == 0x85) append((char)0x8F); // Å
+        else if (b2 == 0x86) append((char)0x92); // Æ
+        else if (b2 == 0x87) append((char)0x80); // Ç
+        else if (b2 == 0x89) append((char)0x90); // É
+        else if (b2 == 0x91) append((char)0xA5); // Ñ
+        else if (b2 == 0x96) append((char)0x99); // Ö
+        else if (b2 == 0x9C) append((char)0x9A); // Ü
+        else if (b2 == 0x97) append('*');        // × (multiplication)
+        else if (b2 == 0x9F) append((char)0xE1); // ß (German eszett)
+        else if (b2 == 0xA0) append((char)0x85); // à
+        else if (b2 == 0xA1) append((char)0xA0); // á
+        else if (b2 == 0xA2) append((char)0x83); // â
+        else if (b2 == 0xA4) append((char)0x84); // ä
+        else if (b2 == 0xA5) append((char)0x86); // å
+        else if (b2 == 0xA6) append((char)0x91); // æ
+        else if (b2 == 0xA7) append((char)0x87); // ç
+        else if (b2 == 0xA8) append((char)0x8A); // è
+        else if (b2 == 0xA9) append((char)0x82); // é
+        else if (b2 == 0xAA) append((char)0x88); // ê
+        else if (b2 == 0xAB) append((char)0x89); // ë
+        else if (b2 == 0xAC) append((char)0x8D); // ì
+        else if (b2 == 0xAD) append((char)0xA1); // í
+        else if (b2 == 0xAE) append((char)0x8C); // î
+        else if (b2 == 0xAF) append((char)0x8B); // ï
+        else if (b2 == 0xB1) append((char)0xA4); // ñ
+        else if (b2 == 0xB2) append((char)0x95); // ò
+        else if (b2 == 0xB3) append((char)0xA2); // ó
+        else if (b2 == 0xB4) append((char)0x93); // ô
+        else if (b2 == 0xB6) append((char)0x94); // ö
+        else if (b2 == 0xB7) append((char)0xF6); // ÷ (division)
+        else if (b2 == 0xB9) append((char)0x97); // ù
+        else if (b2 == 0xBA) append((char)0xA3); // ú
+        else if (b2 == 0xBB) append((char)0x96); // û
+        else if (b2 == 0xBC) append((char)0x81); // ü
+        else if (b2 == 0xBF) append((char)0x98); // ÿ
+        else if (b2 >= 0x80 && b2 <= 0x83) append('A');
+        else if (b2 == 0x88 || b2 == 0x8A || b2 == 0x8B) append('E');
         else if (b2 >= 0x8C && b2 <= 0x8F) append('I');
         else if (b2 == 0x90) append('D');
-        else if (b2 == 0x91) append('N');
-        else if (b2 >= 0x92 && b2 <= 0x96) append('O');
-        else if (b2 >= 0x99 && b2 <= 0x9C) append('U');
+        else if (b2 >= 0x92 && b2 <= 0x95) append('O');
+        else if (b2 >= 0x98 && b2 <= 0x9B) append('U');
         else if (b2 == 0x9D) append('Y');
-        else if (b2 == 0x9F) { append('s'); append('s'); }
-        else if (b2 >= 0xA0 && b2 <= 0xA5) append('a');
-        else if (b2 == 0xA6) { append('a'); append('e'); }
-        else if (b2 == 0xA7) append('c');
-        else if (b2 >= 0xA8 && b2 <= 0xAB) append('e');
-        else if (b2 >= 0xAC && b2 <= 0xAF) append('i');
-        else if (b2 == 0xB1) append('n');
-        else if (b2 >= 0xB2 && b2 <= 0xB6) append('o');
-        else if (b2 >= 0xB9 && b2 <= 0xBC) append('u');
-        else if (b2 == 0xBD || b2 == 0xBF) append('y');
+        else if (b2 == 0xA3) append('a');
+      } else if (b1 == 0xCE) {
+        if (b2 == 0xBC) append((char)0xE6);      // μ (Greek mu)
+        else if (b2 == 0xA9) append((char)0xEA); // Ω (Ohm / Omega)
+        else if (b2 == 0x91) append('A');
+        else if (b2 == 0x92) append('B');
+      } else if (b1 == 0xCF) {
+        if (b2 == 0x80) append((char)0xE3);      // π (pi)
       }
     } else if ((b1 & 0xF0) == 0xE0) {
-      // 3-byte sequence
+      // 3-byte UTF-8 sequence
       uint8_t b2 = *(s + 1);
       uint8_t b3 = *(s + 2);
       if (b2 == 0 || b3 == 0) break;
       s += 3;
-      if (b1 == 0xE2 && b2 == 0x80) {
-        if (b3 == 0x98 || b3 == 0x99) append('\'');     // ‘ ’
-        else if (b3 == 0x9C || b3 == 0x9D) append('\"'); // “ ”
-        else if (b3 == 0x93 || b3 == 0x94) append('-');  // – —
-        else if (b3 == 0xA2) append('*');               // •
-        else if (b3 == 0xA6) { append('.'); append('.'); append('.'); } // …
+      if (b1 == 0xE2) {
+        if (b2 == 0x80) {
+          if (b3 >= 0x90 && b3 <= 0x95) append('-');       // Hyphens, en-dash, em-dash
+          else if (b3 == 0x98 || b3 == 0x99 || b3 == 0x9A || b3 == 0x9B) append('\''); // Smart single quotes
+          else if (b3 >= 0x9C && b3 <= 0x9F) append('\"'); // Smart double quotes
+          else if (b3 == 0xA2) append((char)0xF9);         // • Bullet (CP437 ∙)
+          else if (b3 == 0xA6) { append('.'); append('.'); append('.'); } // … Ellipsis
+          else if (b3 == 0xB2) append('\'');               // ′ Prime
+          else if (b3 == 0xB3) append('\"');               // ″ Double prime
+        } else if (b2 == 0x81) {
+          if (b3 == 0xBF) append((char)0xFC);              // ⁿ (superscript n)
+          else if (b3 >= 0xB0 && b3 <= 0xB9) append('0' + (b3 - 0xB0)); // ⁰..⁹
+        } else if (b2 == 0x82) {
+          if (b3 == 0xAC) append('E');                     // € Euro
+          else if (b3 >= 0x80 && b3 <= 0x89) append('0' + (b3 - 0x80)); // ₀..₉
+        } else if (b2 == 0x84) {
+          if (b3 == 0x83) { append((char)0xF8); append('C'); } // ℃ -> °C
+          else if (b3 == 0x89) { append((char)0xF8); append('F'); } // ℉ -> °F
+          else if (b3 == 0xA6) append((char)0xEA);         // Ω (Ohm)
+        } else if (b2 == 0x86) {
+          if (b3 == 0x90) { append('<'); append('-'); }    // ←
+          else if (b3 == 0x91) append('^');                // ↑
+          else if (b3 == 0x92) { append('-'); append('>'); } // →
+          else if (b3 == 0x93) append('v');                // ↓
+          else if (b3 == 0x94) { append('<'); append('>'); } // ↔
+        } else if (b2 == 0x87) {
+          if (b3 == 0x92) { append('='); append('>'); }    // ⇒
+          else if (b3 == 0x94) { append('<'); append('='); append('>'); } // ⇔
+        } else if (b2 == 0x88) {
+          if (b3 == 0x92) append('-');                     // − Mathematical minus (U+2212)
+          else if (b3 == 0x99) append((char)0xF9);         // ∙ Bullet operator
+          else if (b3 == 0x9A) append((char)0xFB);         // √ Square root
+          else if (b3 == 0x9E) append((char)0xEC);         // ∞ Infinity
+          else if (b3 == 0xA9) append((char)0xEF);         // ∩ Intersection
+        } else if (b2 == 0x89) {
+          if (b3 == 0x88) append((char)0xF7);              // ≈ Almost equal
+          else if (b3 == 0xA0) { append('!'); append('='); } // ≠ Not equal
+          else if (b3 == 0xA1) append((char)0xF0);         // ≡ Identical
+          else if (b3 == 0xA4) append((char)0xF3);         // ≤ Less than or equal
+          else if (b3 == 0xA5) append((char)0xF2);         // ≥ Greater than or equal
+        } else if (b2 == 0x98 || b2 == 0x99 || b2 == 0x9A || b2 == 0x9C) {
+          if (b2 == 0x98 && (b3 == 0x85 || b3 == 0x86)) append('*'); // ★ ☆
+          else if (b2 == 0x99 && b3 == 0xA5) { append('<'); append('3'); } // ♥
+          else if (b2 == 0x99 && (b3 == 0xAA || b3 == 0xAB)) append('#'); // ♪ ♫
+          else if (b2 == 0x9A && b3 == 0xA0) append('!');   // ⚠
+          else if (b2 == 0x9A && b3 == 0xA1) append('*');   // ⚡
+          else if (b2 == 0x9C && (b3 == 0x93 || b3 == 0x94)) append('v'); // ✓ ✔
+          else if (b2 == 0x9C && (b3 == 0x97 || b3 == 0x98)) append('x'); // ✗ ✘
+        }
       }
     } else if ((b1 & 0xF8) == 0xF0) {
-      // 4-byte sequence (Emojis, etc.)
+      // 4-byte UTF-8 sequence (Emojis, SMP characters)
       uint8_t b2 = *(s + 1);
       uint8_t b3 = *(s + 2);
       uint8_t b4 = *(s + 3);
       if (b2 == 0 || b3 == 0 || b4 == 0) break;
       s += 4;
-      // Skip emojis entirely so no strange glyphs like =fiñQ appear
+      // Skip 4-byte emojis cleanly so no garbage glyphs appear
     } else {
+      // Single byte outside standard ASCII (e.g. pre-existing CP437 character >= 128)
+      if (b1 >= 128) {
+        append((char)b1);
+      }
       s++;
+    }
+  }
+  dest[di] = 0;
+}
+
+void TapUI::encodeCP437ToUTF8(char* dest, const char* src, size_t dest_size) {
+  if (!dest || dest_size == 0) return;
+  if (!src) {
+    dest[0] = 0;
+    return;
+  }
+  size_t di = 0;
+  const uint8_t* s = (const uint8_t*)src;
+
+  auto appendByte = [&](uint8_t b) {
+    if (di < dest_size - 1) {
+      dest[di++] = (char)b;
+    }
+  };
+
+  while (*s && di < dest_size - 1) {
+    uint8_t c = *s++;
+    if (c < 128) {
+      appendByte(c);
+    } else if (c == 0xF8) { // Degree '°' -> UTF-8 0xC2 0xB0
+      appendByte(0xC2); appendByte(0xB0);
+    } else if (c == 0xF1) { // '±' -> UTF-8 0xC2 0xB1
+      appendByte(0xC2); appendByte(0xB1);
+    } else if (c == 0xE6) { // 'µ' -> UTF-8 0xC2 0xB5
+      appendByte(0xC2); appendByte(0xB5);
+    } else if (c == 0xFA) { // '·' -> UTF-8 0xC2 0xB7
+      appendByte(0xC2); appendByte(0xB7);
+    } else if (c == 0xF9) { // '∙' -> UTF-8 0xE2 0x88 0x99
+      appendByte(0xE2); appendByte(0x88); appendByte(0x99);
+    } else if (c == 0xFD) { // '²' -> UTF-8 0xC2 0xB2
+      appendByte(0xC2); appendByte(0xB2);
+    } else if (c == 0xFC) { // 'ⁿ' -> UTF-8 0xE2 0x81 0xBF
+      appendByte(0xE2); appendByte(0x81); appendByte(0xBF);
+    } else if (c == 0xAB) { // '½' -> UTF-8 0xC2 0xBD
+      appendByte(0xC2); appendByte(0xBD);
+    } else if (c == 0xAC) { // '¼' -> UTF-8 0xC2 0xBC
+      appendByte(0xC2); appendByte(0xBC);
+    } else if (c == 0xE1) { // 'ß' -> UTF-8 0xC3 0x9F
+      appendByte(0xC3); appendByte(0x9F);
+    } else if (c == 0xF6) { // '÷' -> UTF-8 0xC3 0xB7
+      appendByte(0xC3); appendByte(0xB7);
+    } else if (c == 0xF3) { // '≤' -> UTF-8 0xE2 0x89 0xA4
+      appendByte(0xE2); appendByte(0x89); appendByte(0xA4);
+    } else if (c == 0xF2) { // '≥' -> UTF-8 0xE2 0x89 0xA5
+      appendByte(0xE2); appendByte(0x89); appendByte(0xA5);
+    } else if (c == 0xF7) { // '≈' -> UTF-8 0xE2 0x89 0x88
+      appendByte(0xE2); appendByte(0x89); appendByte(0x88);
+    } else if (c == 0xF0) { // '≡' -> UTF-8 0xE2 0x89 0xA1
+      appendByte(0xE2); appendByte(0x89); appendByte(0xA1);
+    } else if (c == 0xFB) { // '√' -> UTF-8 0xE2 0x88 0x9A
+      appendByte(0xE2); appendByte(0x88); appendByte(0x9A);
+    } else if (c == 0xEC) { // '∞' -> UTF-8 0xE2 0x88 0x9E
+      appendByte(0xE2); appendByte(0x88); appendByte(0x9E);
+    } else if (c == 0xEA) { // 'Ω' -> UTF-8 0xCE 0xA9
+      appendByte(0xCE); appendByte(0xA9);
+    } else if (c == 0xE3) { // 'π' -> UTF-8 0xCF 0x80
+      appendByte(0xCF); appendByte(0x80);
+    } else if (c == 0x9C) { // '£' -> UTF-8 0xC2 0xA3
+      appendByte(0xC2); appendByte(0xA3);
+    } else if (c == 0x9D) { // '¥' -> UTF-8 0xC2 0xA5
+      appendByte(0xC2); appendByte(0xA5);
+    } else if (c == 0x9B) { // '¢' -> UTF-8 0xC2 0xA2
+      appendByte(0xC2); appendByte(0xA2);
+    } else if (c == 0xA8) { // '¿' -> UTF-8 0xC2 0xBF
+      appendByte(0xC2); appendByte(0xBF);
+    } else if (c == 0xAD) { // '¡' -> UTF-8 0xC2 0xA1
+      appendByte(0xC2); appendByte(0xA1);
+    } else {
+      appendByte(c);
     }
   }
   dest[di] = 0;
@@ -1244,17 +1409,20 @@ void TapUI::addSentMessage(const char* text) {
 void TapUI::sendMessage(const char* text) {
   if (!text || strlen(text) == 0) return;
 
+  char outBuf[MAX_MSG_TEXT_LEN * 2];
+  encodeCP437ToUTF8(outBuf, text, sizeof(outBuf));
+
   if (_active_contact_idx >= 0) {
     ContactInfo c;
     if (the_mesh.getContactByIdx(_active_contact_idx, c)) {
       uint32_t ack = 0;
       uint32_t timeout = 0;
-      the_mesh.sendMessage(c, the_mesh.getRTCClock()->getCurrentTimeUnique(), 0, text, ack, timeout);
+      the_mesh.sendMessage(c, the_mesh.getRTCClock()->getCurrentTimeUnique(), 0, outBuf, ack, timeout);
     }
   } else {
     ChannelDetails ch;
     if (the_mesh.getChannel(_active_channel, ch)) {
-      the_mesh.sendGroupMessage(the_mesh.getRTCClock()->getCurrentTimeUnique(), ch.channel, the_mesh.getNodePrefs()->node_name, text, strlen(text));
+      the_mesh.sendGroupMessage(the_mesh.getRTCClock()->getCurrentTimeUnique(), ch.channel, the_mesh.getNodePrefs()->node_name, outBuf, strlen(outBuf));
     }
   }
   addSentMessage(text);
@@ -2224,18 +2392,27 @@ void TapUI::drawKeyboard() {
 
   const char* r0_lower = "qwertyuiop";
   const char* r0_upper = "QWERTYUIOP";
-  const char* r0_sym   = "1234567890";
-  const char* r0 = (_kb_mode == KB_SYMBOLS) ? r0_sym : ((_kb_mode == KB_UPPER) ? r0_upper : r0_lower);
+  const char* r0_sym1  = "1234567890";
+  const char* r0_sym2  = "~`|^\\=<>]";
+  const char* r0 = (_kb_mode == KB_SYMBOLS_2) ? r0_sym2 :
+                   ((_kb_mode == KB_SYMBOLS) ? r0_sym1 :
+                   ((_kb_mode == KB_UPPER) ? r0_upper : r0_lower));
 
   const char* r1_lower = "asdfghjkl";
   const char* r1_upper = "ASDFGHJKL";
-  const char* r1_sym   = "@#$%&*-+/";
-  const char* r1 = (_kb_mode == KB_SYMBOLS) ? r1_sym : ((_kb_mode == KB_UPPER) ? r1_upper : r1_lower);
+  const char* r1_sym1  = "@#$%&*-+/";
+  const char* r1_sym2  = "{};\"'\xF8_$\xF6";
+  const char* r1 = (_kb_mode == KB_SYMBOLS_2) ? r1_sym2 :
+                   ((_kb_mode == KB_SYMBOLS) ? r1_sym1 :
+                   ((_kb_mode == KB_UPPER) ? r1_upper : r1_lower));
 
   const char* r2_lower = "zxcvbnm";
   const char* r2_upper = "ZXCVBNM";
-  const char* r2_sym   = "()!?:,.";
-  const char* r2 = (_kb_mode == KB_SYMBOLS) ? r2_sym : ((_kb_mode == KB_UPPER) ? r2_upper : r2_lower);
+  const char* r2_sym1  = "()!?:,.";
+  const char* r2_sym2  = "\xF1\xF3\xF2\xEC\xFB\xFA%";
+  const char* r2 = (_kb_mode == KB_SYMBOLS_2) ? r2_sym2 :
+                   ((_kb_mode == KB_SYMBOLS) ? r2_sym1 :
+                   ((_kb_mode == KB_UPPER) ? r2_upper : r2_lower));
 
   // Row 0: Y = 72..110 (height 38)
   for (int k = 0; k < 10; k++) {
@@ -2266,14 +2443,21 @@ void TapUI::drawKeyboard() {
   }
 
   // Row 2: Y = 156..194 (height 38)
-  // CAP button: X in 1..35
-  _display->setColor((_kb_mode == KB_UPPER) ? COLOR_BLUE_KEY : colCardBg());
+  // CAP / #+= / 123 button: X in 1..35
+  bool capActive = (_kb_mode == KB_UPPER || _kb_mode == KB_SYMBOLS_2);
+  _display->setColor(capActive ? COLOR_BLUE_KEY : colCardBg());
   _display->fillRect(1, 156, 35, 38);
   _display->setColor(colBorder());
   _display->drawRect(1, 156, 35, 38);
-  _display->setColor((_kb_mode == KB_UPPER) ? COLOR_WHITE : colText());
+  _display->setColor(capActive ? COLOR_WHITE : colText());
   _display->setTextSize(1);
-  drawStr(8, 170, "CAP");
+  if (_kb_mode == KB_SYMBOLS) {
+    drawStr(8, 170, "#+=");
+  } else if (_kb_mode == KB_SYMBOLS_2) {
+    drawStr(8, 170, "123");
+  } else {
+    drawStr(8, 170, "CAP");
+  }
 
   // 7 keys: X = 38 + k*32
   for (int k = 0; k < 7; k++) {
@@ -2301,13 +2485,14 @@ void TapUI::drawKeyboard() {
   // Row 3: Y = 198..237 (height 39)
   _display->setTextSize(1);
 
-  // ?123 button: X in 1..42
-  _display->setColor((_kb_mode == KB_SYMBOLS) ? COLOR_BLUE_KEY : colCardBg());
+  // ?123 / ABC button: X in 1..42
+  bool isSymMode = (_kb_mode == KB_SYMBOLS || _kb_mode == KB_SYMBOLS_2);
+  _display->setColor(isSymMode ? COLOR_BLUE_KEY : colCardBg());
   _display->fillRect(1, 198, 42, 39);
   _display->setColor(colBorder());
   _display->drawRect(1, 198, 42, 39);
-  _display->setColor((_kb_mode == KB_SYMBOLS) ? COLOR_WHITE : colText());
-  drawStr(8, 212, (_kb_mode == KB_SYMBOLS) ? "ABC" : "?123");
+  _display->setColor(isSymMode ? COLOR_WHITE : colText());
+  drawStr(8, 212, isSymMode ? "ABC" : "?123");
 
   // QUICK / CLEAR button: X in 45..95
   _display->setColor(COLOR_PURPLE_BTN);
@@ -2399,18 +2584,27 @@ void TapUI::handleChatTouch(uint16_t tx, uint16_t ty) {
 void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
   const char* r0_lower = "qwertyuiop";
   const char* r0_upper = "QWERTYUIOP";
-  const char* r0_sym   = "1234567890";
-  const char* r0 = (_kb_mode == KB_SYMBOLS) ? r0_sym : ((_kb_mode == KB_UPPER) ? r0_upper : r0_lower);
+  const char* r0_sym1  = "1234567890";
+  const char* r0_sym2  = "~`|^\\=<>]";
+  const char* r0 = (_kb_mode == KB_SYMBOLS_2) ? r0_sym2 :
+                   ((_kb_mode == KB_SYMBOLS) ? r0_sym1 :
+                   ((_kb_mode == KB_UPPER) ? r0_upper : r0_lower));
 
   const char* r1_lower = "asdfghjkl";
   const char* r1_upper = "ASDFGHJKL";
-  const char* r1_sym   = "@#$%&*-+/";
-  const char* r1 = (_kb_mode == KB_SYMBOLS) ? r1_sym : ((_kb_mode == KB_UPPER) ? r1_upper : r1_lower);
+  const char* r1_sym1  = "@#$%&*-+/";
+  const char* r1_sym2  = "{};\"'\xF8_$\xF6";
+  const char* r1 = (_kb_mode == KB_SYMBOLS_2) ? r1_sym2 :
+                   ((_kb_mode == KB_SYMBOLS) ? r1_sym1 :
+                   ((_kb_mode == KB_UPPER) ? r1_upper : r1_lower));
 
   const char* r2_lower = "zxcvbnm";
   const char* r2_upper = "ZXCVBNM";
-  const char* r2_sym   = "()!?:,.";
-  const char* r2 = (_kb_mode == KB_SYMBOLS) ? r2_sym : ((_kb_mode == KB_UPPER) ? r2_upper : r2_lower);
+  const char* r2_sym1  = "()!?:,.";
+  const char* r2_sym2  = "\xF1\xF3\xF2\xEC\xFB\xFA%";
+  const char* r2 = (_kb_mode == KB_SYMBOLS_2) ? r2_sym2 :
+                   ((_kb_mode == KB_SYMBOLS) ? r2_sym1 :
+                   ((_kb_mode == KB_UPPER) ? r2_upper : r2_lower));
 
   // Row 0: Y in 70..112
   if (ty >= 70 && ty <= 112) {
@@ -2439,6 +2633,8 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
     if (tx >= 1 && tx <= 36) {
       if (_kb_mode == KB_LOWER) _kb_mode = KB_UPPER;
       else if (_kb_mode == KB_UPPER) _kb_mode = KB_LOWER;
+      else if (_kb_mode == KB_SYMBOLS) _kb_mode = KB_SYMBOLS_2;
+      else if (_kb_mode == KB_SYMBOLS_2) _kb_mode = KB_SYMBOLS;
       drawKeyboard();
       return;
     }
@@ -2458,7 +2654,7 @@ void TapUI::handleKeyboardTouch(uint16_t tx, uint16_t ty) {
   // Row 3: Y in 197..240
   if (ty >= 197 && ty <= 240) {
     if (tx >= 1 && tx <= 43) {
-      if (_kb_mode == KB_SYMBOLS) _kb_mode = KB_LOWER;
+      if (_kb_mode == KB_SYMBOLS || _kb_mode == KB_SYMBOLS_2) _kb_mode = KB_LOWER;
       else _kb_mode = KB_SYMBOLS;
       drawKeyboard();
       return;

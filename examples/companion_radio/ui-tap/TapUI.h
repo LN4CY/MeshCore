@@ -50,7 +50,8 @@ enum TapTab {
 enum KeyboardMode {
   KB_LOWER = 0,
   KB_UPPER = 1,
-  KB_SYMBOLS = 2
+  KB_SYMBOLS = 2,
+  KB_SYMBOLS_2 = 3
 };
 
 enum TapEditMode {
@@ -217,6 +218,7 @@ private:
   void markCurrentConversationRead();
   void formatAndWrapMessage(const char* prefix, const char* text, uint16_t color);
   static void sanitizeUTF8String(char* dest, const char* src, size_t dest_size);
+  static void encodeCP437ToUTF8(char* dest, const char* src, size_t dest_size);
   void drawNodesScreen();
   void drawChansScreen();
   void drawChannelEditor();
