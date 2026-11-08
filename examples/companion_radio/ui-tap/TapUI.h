@@ -213,6 +213,7 @@ private:
   void drawChatMessagesOnly();
   void drawChatInputPrompt();
   bool jumpToOldestUnread();
+  void markCurrentConversationRead();
   void formatAndWrapMessage(const char* prefix, const char* text, uint16_t color);
   static void sanitizeUTF8String(char* dest, const char* src, size_t dest_size);
   void drawNodesScreen();

@@ -519,6 +519,8 @@ void TapUI::setActiveChannel(uint8_t idx) {
     _active_channel = idx;
     _active_contact_idx = -1;
     _chat_scroll_offset = 0;
+    _kb_visible = false;
+    markCurrentConversationRead();
     _needs_full_redraw = true;
   }
 }
@@ -1496,6 +1498,10 @@ void TapUI::update() {
     _needs_chat_messages_redraw = false;
     _needs_tabbar_redraw = false;
 
+    if (_current_tab == TAB_CHAT) {
+      markCurrentConversationRead();
+    }
+
     _display->setColor(colBg());
     _display->fillRect(0, 0, 320, 240);
 
@@ -1514,6 +1520,7 @@ void TapUI::update() {
     _needs_chat_messages_redraw = false;
     _needs_tabbar_redraw = false;
     if (_current_tab == TAB_CHAT) {
+      markCurrentConversationRead();
       if (!_kb_visible && _edit_mode == EDIT_NONE) {
         drawChatMessagesOnly();
         drawChatInputPrompt();
@@ -1669,9 +1676,13 @@ void TapUI::drawTabBar() {
   _display->fillRect(0, 20, 320, 23);
 
   int totalUnread = getTotalUnreadCount();
-  char chatTabLabel[12];
+  char chatTabLabel[14];
   if (totalUnread > 0) {
-    snprintf(chatTabLabel, sizeof(chatTabLabel), "CHAT(%d)", totalUnread > 9 ? 9 : totalUnread);
+    if (totalUnread > 99) {
+      strcpy(chatTabLabel, "CHAT(99+)");
+    } else {
+      snprintf(chatTabLabel, sizeof(chatTabLabel), "CHAT(%d)", totalUnread);
+    }
   } else {
     strcpy(chatTabLabel, "CHAT");
   }
@@ -1705,42 +1716,75 @@ void TapUI::drawTabBar() {
 }
 
 bool TapUI::jumpToOldestUnread() {
-  int oldest_unread_idx = -1;
+  int total_slots = the_mesh.getTotalContactSlots();
+  ContactInfo c;
+
   for (int i = 0; i < _msg_count; i++) {
-    if (_messages[i].unread) {
-      oldest_unread_idx = i;
-      break;
+    if (!_messages[i].unread) continue;
+
+    const UIMessage& unread_m = _messages[i];
+    if (unread_m.is_direct) {
+      int contact_slot = -1;
+      for (int s = 8; s < total_slots; s++) {
+        if (the_mesh.getContactByIdx(s, c) && c.type != 0) {
+          if (memcmp(c.id.pub_key, unread_m.contact_pubkey, 4) == 0 ||
+              (unread_m.sender[0] && strcmp(c.name, unread_m.sender) == 0)) {
+            contact_slot = s;
+            break;
+          }
+        }
+      }
+      if (contact_slot >= 0) {
+        // If already looking at this contact, find next unread conversation
+        if (_current_tab == TAB_CHAT && _active_contact_idx == contact_slot) {
+          continue;
+        }
+        _active_contact_idx = contact_slot;
+        _chat_scroll_offset = 0;
+        markCurrentConversationRead();
+        return true;
+      }
+      // If contact slot not found for this direct message, continue searching
+    } else {
+      // If already looking at this channel, find next unread conversation
+      if (_current_tab == TAB_CHAT && _active_contact_idx == -1 && _active_channel == unread_m.channel_idx) {
+        continue;
+      }
+      _active_channel = unread_m.channel_idx;
+      _active_contact_idx = -1;
+      _chat_scroll_offset = 0;
+      markCurrentConversationRead();
+      return true;
     }
   }
+  return false;
+}
 
-  if (oldest_unread_idx < 0) return false;
-
-  const UIMessage& unread_m = _messages[oldest_unread_idx];
-  if (unread_m.is_direct) {
-    int contact_slot = -1;
-    int total_slots = the_mesh.getTotalContactSlots();
-    ContactInfo c;
-    for (int s = 8; s < total_slots; s++) {
-      if (the_mesh.getContactByIdx(s, c) && c.type != 0) {
-        if (memcmp(c.id.pub_key, unread_m.contact_pubkey, 4) == 0 ||
-            (unread_m.sender[0] && strcmp(c.name, unread_m.sender) == 0)) {
-          contact_slot = s;
-          break;
+void TapUI::markCurrentConversationRead() {
+  if (_active_contact_idx >= 0) {
+    ContactInfo active_c;
+    if (the_mesh.getContactByIdx(_active_contact_idx, active_c)) {
+      for (int i = 0; i < _msg_count; i++) {
+        if (_messages[i].unread && _messages[i].is_direct &&
+            (memcmp(_messages[i].contact_pubkey, active_c.id.pub_key, 4) == 0 ||
+             strcmp(_messages[i].sender, active_c.name) == 0 ||
+             strcmp(_messages[i].target_name, active_c.name) == 0)) {
+          _messages[i].unread = false;
         }
       }
     }
-    if (contact_slot >= 0) {
-      _active_contact_idx = contact_slot;
-      _chat_scroll_offset = 0;
-      return true;
-    }
   } else {
-    _active_channel = unread_m.channel_idx;
-    _active_contact_idx = -1;
-    _chat_scroll_offset = 0;
-    return true;
+    ChannelDetails active_ch;
+    memset(&active_ch, 0, sizeof(active_ch));
+    the_mesh.getChannel(_active_channel, active_ch);
+    for (int i = 0; i < _msg_count; i++) {
+      if (_messages[i].unread && !_messages[i].is_direct &&
+          (_messages[i].channel_idx == _active_channel ||
+           (active_ch.name[0] != 0 && strcmp(_messages[i].target_name, active_ch.name) == 0))) {
+        _messages[i].unread = false;
+      }
+    }
   }
-  return false;
 }
 
 void TapUI::handleTabTouch(uint16_t tx, uint16_t ty) {
@@ -1844,6 +1888,9 @@ void TapUI::drawChatMessagesOnly() {
 
   // Format and wrap messages into line items
   _total_chat_lines = 0;
+  for (int k = 0; k < matchCount; k++) {
+    _messages[_chat_match_indices[k]].unread = false;
+  }
   int startMsg = 0;
   if (matchCount > 40) {
     startMsg = matchCount - 40;
@@ -2291,6 +2338,9 @@ void TapUI::handleChatTouch(uint16_t tx, uint16_t ty) {
       // DN (newer lines)
       _chat_scroll_offset -= 4;
       if (_chat_scroll_offset < 0) _chat_scroll_offset = 0;
+      if (_chat_scroll_offset == 0) {
+        markCurrentConversationRead();
+      }
       _needs_chat_messages_redraw = true;
       return;
     }
@@ -3018,6 +3068,8 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
           _active_contact_idx = -1;
           _chat_scroll_offset = 0;
           _current_tab = TAB_CHAT;
+          _kb_visible = false;
+          markCurrentConversationRead();
           _needs_full_redraw = true;
           return;
         }
@@ -3041,6 +3093,8 @@ void TapUI::handleChansTouch(uint16_t tx, uint16_t ty) {
           _active_contact_idx = i;
           _chat_scroll_offset = 0;
           _current_tab = TAB_CHAT;
+          _kb_visible = false;
+          markCurrentConversationRead();
           _needs_full_redraw = true;
           return;
         }
@@ -3899,6 +3953,8 @@ void TapUI::handleGPSNavTouch(uint16_t tx, uint16_t ty) {
       _active_contact_idx = _sorted_nodes[selIdx].contact_idx;
       _chat_scroll_offset = 0;
       _current_tab = TAB_CHAT;
+      _kb_visible = false;
+      markCurrentConversationRead();
       _needs_full_redraw = true;
       return;
     }
