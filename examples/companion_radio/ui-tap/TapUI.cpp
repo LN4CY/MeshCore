@@ -1787,14 +1787,56 @@ void TapUI::markCurrentConversationRead() {
   }
 }
 
+void TapUI::cycleNextConfiguredChannel() {
+  // If currently in a DM, return to active channel
+  if (_active_contact_idx >= 0) {
+    _active_contact_idx = -1;
+    _chat_scroll_offset = 0;
+    _kb_visible = false;
+    _edit_mode = EDIT_NONE;
+    markCurrentConversationRead();
+    _needs_full_redraw = true;
+    return;
+  }
+
+  // Scan through channels starting from (_active_channel + 1)
+  uint8_t cur = _active_channel;
+  for (int step = 1; step <= MAX_GROUP_CHANNELS; step++) {
+    uint8_t cand = (cur + step) % MAX_GROUP_CHANNELS;
+    ChannelDetails ch;
+    memset(&ch, 0, sizeof(ch));
+    the_mesh.getChannel(cand, ch);
+    bool isConfigured = (cand == 0) || !(ch.name[0] == 0 && isChannelSecretZero(ch.channel.secret, 16));
+    if (isConfigured) {
+      _active_channel = cand;
+      _active_contact_idx = -1;
+      _chat_scroll_offset = 0;
+      _kb_visible = false;
+      _edit_mode = EDIT_NONE;
+      markCurrentConversationRead();
+      _needs_full_redraw = true;
+      return;
+    }
+  }
+}
+
 void TapUI::handleTabTouch(uint16_t tx, uint16_t ty) {
   int tabIdx = tx / 64;
   if (tabIdx >= 0 && tabIdx <= 4) {
     if (tabIdx == (int)TAB_CHAT) {
-      // Shortcut: When tapping CHAT tab, check if there are unread messages.
-      // Jump directly to the channel/conversation with the oldest unread message.
+      // 1. If there are unread messages, jump to the channel/conversation with the oldest unread message
       bool jumped = jumpToOldestUnread();
-      if (_current_tab != TAB_CHAT || jumped || _edit_mode != EDIT_NONE || _kb_visible) {
+      if (jumped) {
+        _current_tab = TAB_CHAT;
+        _edit_mode = EDIT_NONE;
+        _editing_chan_idx = -1;
+        _kb_visible = false;
+        _needs_full_redraw = true;
+      } else if (_current_tab == TAB_CHAT) {
+        // 2. Already on CHAT tab with no unread messages: cycle through configured channels
+        cycleNextConfiguredChannel();
+      } else {
+        // 3. Switching to CHAT tab from another tab
         _current_tab = TAB_CHAT;
         _edit_mode = EDIT_NONE;
         _editing_chan_idx = -1;
